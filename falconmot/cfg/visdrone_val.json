@@ -1,0 +1,6 @@
+{
+    "root": "/workspace/VisDrone2019",
+    "val": {
+        "visdrone_val": "/workspace/VisDrone2019/VisDrone.val"
+    }
+}

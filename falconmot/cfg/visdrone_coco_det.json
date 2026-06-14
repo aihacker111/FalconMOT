@@ -1,0 +1,7 @@
+{
+    "root":      "/workspace/VisDrone2019-DET-COCO",
+    "train_ann": "/workspace/VisDrone2019-DET-COCO/train/annotations/instances_train.json",
+    "train_img": "/workspace/VisDrone2019-DET-COCO/train/images",
+    "val_ann":   "/workspace/VisDrone2019-DET-COCO/val/annotations/instances_val.json",
+    "val_img":   "/workspace/VisDrone2019-DET-COCO/val/images_val"
+}
