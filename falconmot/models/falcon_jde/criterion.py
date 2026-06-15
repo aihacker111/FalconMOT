@@ -69,21 +69,22 @@ class TripletLoss(nn.Module):
         dist = dist + dist.t()
         dist.addmm_(inputs, inputs.t(), beta=1, alpha=-2)
         dist = dist.clamp(min=1e-12).sqrt()
-        mask = targets.expand(n, n).eq(targets.expand(n, n).t())
-        dist_ap, dist_an = [], []
-        for i in range(n):
-            pos = dist[i][mask[i]]
-            neg = dist[i][~mask[i]]
-            if pos.numel() == 0 or neg.numel() == 0:
-                continue
-            dist_ap.append(pos.max().unsqueeze(0))
-            dist_an.append(neg.min().unsqueeze(0))
-        if not dist_ap:
+        # Batch-hard mining — VECTORIZED. Bản cũ dùng vòng `for i in range(n)`
+        # với boolean-index `dist[i][mask[i]]` (kích thước phụ thuộc dữ liệu trên
+        # GPU) → ép đồng bộ CPU↔GPU mỗi anchor; với class dày đặc (n vài trăm) là
+        # nghẽn chính khi bật --tri. Phiên bản này không vòng lặp, không sync,
+        # cho kết quả số HỆT bản cũ.
+        mask_pos = targets.unsqueeze(0).eq(targets.unsqueeze(1))   # (n, n), gồm self
+        mask_neg = ~mask_pos
+        dist_ap = dist.masked_fill(mask_neg, float('-inf')).max(dim=1).values  # hardest pos
+        dist_an = dist.masked_fill(mask_pos, float('inf')).min(dim=1).values   # hardest neg
+        valid   = mask_neg.any(dim=1)   # chỉ giữ anchor có ≥1 negative (như bản cũ)
+        dist_ap = dist_ap[valid]
+        dist_an = dist_an[valid]
+        if dist_ap.numel() == 0:
             return inputs.sum() * 0
-        return self.ranking_loss(
-            torch.cat(dist_an), torch.cat(dist_ap),
-            torch.ones(len(dist_an), device=inputs.device)
-        )
+        y = torch.ones_like(dist_an)
+        return self.ranking_loss(dist_an, dist_ap, y)
 
 
 # ---------------------------------------------------------------------------
