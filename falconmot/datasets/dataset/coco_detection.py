@@ -203,19 +203,31 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         Labels are remapped from per-frame cxcywh-norm to mosaic-norm space.
         """
         seq, pos = self._id_to_pos.get(anchor_img_id, (None, 0))
+        four_ids = None
         if seq is not None:
             seq_ids = self._seq_to_ids[seq]
             n = len(seq_ids)
-            max_off = max(5, min(30, n // 4))
-            partners = []
-            for sign in [1, -1, 1]:
-                off = random.randint(5, max_off) * sign
-                partners.append(seq_ids[max(0, min(n - 1, pos + off))])
-        else:
-            # Fallback: random frames from anywhere
-            partners = random.choices(self.img_ids, k=3)
+            if n >= 4:
+                # 3 partner frames PHÂN BIỆT trong cửa sổ thời gian quanh anchor
+                # → cùng identity ở pose/vị trí khác nhau (positive tự nhiên cho
+                # ReID), thay vì lặp lại đúng một khung hình như bản cũ.
+                win = max(8, min(30, n // 4))   # bán kính cửa sổ (frame)
+                gap = 3                          # bỏ khung kề sát (gần trùng)
+                lo, hi = max(0, pos - win), min(n - 1, pos + win)
+                cand = [p for p in range(lo, hi + 1) if abs(p - pos) >= gap]
+                if len(cand) < 3:                # cửa sổ bị cắt ở biên seq
+                    cand = [p for p in range(n) if p != pos]
+                picks = random.sample(cand, 3)   # không lặp
+                four_ids = [anchor_img_id] + [seq_ids[p] for p in picks]
 
-        four_ids = [anchor_img_id] + partners
+        if four_ids is None:
+            # Fallback: seq quá ngắn (n < 4) hoặc anchor không có seq index →
+            # anchor + 3 ảnh PHÂN BIỆT bất kỳ trong dataset.
+            pool  = [i for i in self.img_ids if i != anchor_img_id]
+            extra = (random.sample(pool, 3) if len(pool) >= 3
+                     else random.choices(self.img_ids, k=3))
+            four_ids = [anchor_img_id] + extra
+
         random.shuffle(four_ids)
 
         mid_x, mid_y = self.width // 2, self.height // 2
@@ -504,10 +516,17 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
 
 
 # ---------------------------------------------------------------------------
-# Inference loader — mirrors val preprocessing of VisDroneCocoDataset exactly:
-#   letterbox → BGR→RGB → /255.0  (no augmentation, no normalization)
-# Use this in track.py so train/infer preprocessing is identical.
+# Inference preprocessing — KHỚP CHÍNH XÁC val path của VisDroneCocoDataset:
+#   plain resize (W, H) → BGR→RGB → /255.0  (no letterbox, no aug, no normalize)
+# Mọi loader tracking PHẢI gọi hàm này để đồng bộ tuyệt đối với training.
 # ---------------------------------------------------------------------------
+
+def preprocess_for_tracking(img0, width: int, height: int):
+    """BGR uint8 (H0, W0, 3) → (3, H, W) float32, plain resize + /255 (no letterbox)."""
+    img = cv2.resize(img0, (width, height), interpolation=cv2.INTER_AREA)
+    img = img[:, :, ::-1].astype(np.float32) / 255.0
+    return np.ascontiguousarray(img.transpose(2, 0, 1))   # (3, H, W)
+
 
 class LoadImagesForTracking:
     """
@@ -558,10 +577,7 @@ class LoadImagesForTracking:
         img0 = cv2.imread(img_path)   # BGR uint8
         assert img0 is not None, f'Failed to load {img_path}'
 
-        img = cv2.resize(img0, (self.width, self.height), interpolation=cv2.INTER_AREA)
-        img = img[:, :, ::-1].astype(np.float32) / 255.0
-        img = np.ascontiguousarray(img.transpose(2, 0, 1))   # (3, H, W)
-
+        img = preprocess_for_tracking(img0, self.width, self.height)
         return img_path, img, img0
 
     def __getitem__(self, idx):
@@ -569,10 +585,113 @@ class LoadImagesForTracking:
         img_path = self.files[idx]
         img0     = cv2.imread(img_path)
         assert img0 is not None, f'Failed to load {img_path}'
-        img = cv2.resize(img0, (self.width, self.height), interpolation=cv2.INTER_AREA)
-        img = img[:, :, ::-1].astype(np.float32) / 255.0
-        img = np.ascontiguousarray(img.transpose(2, 0, 1))
+        img = preprocess_for_tracking(img0, self.width, self.height)
         return img_path, img, img0
 
     def __len__(self):
         return self.nF
+
+# ---------------------------------------------------------------------------
+# COCO-JSON-driven sequence loader for tracking.
+#
+# Đọc THẲNG file COCO JSON (instances_val.json) do gen_dataset_visdrone_coco.py
+# sinh ra — cùng MỘT nguồn dữ liệu với training. Nhờ vậy tracker dùng đúng:
+#   * ảnh đã convert (ignore-region đã được tô đen) — khớp pixel với train/val
+#   * định nghĩa sequence / frame lấy từ JSON (không hardcode danh sách seq)
+#   * tiền xử lý y hệt (preprocess_for_tracking: plain resize + /255, no letterbox)
+#
+# Mỗi sequence được duyệt theo frame_id tăng dần; loader trả về frame_id THẬT
+# (số khung hình gốc của VisDrone) để khớp với GT của Evaluator (đọc từ
+# annotations/<seq>.txt cũng đánh số theo frame_id thật).
+#
+# LƯU Ý: gen_dataset chỉ ghi các frame CÓ annotation hợp lệ; frame trống (chỉ
+# ignore-region) bị bỏ. Điều này không gây false-negative khi eval (các frame đó
+# vốn không có GT hợp lệ), nhưng nếu cần tracking đầy đủ mọi frame thì sửa
+# gen_dataset để ghi toàn bộ frame.
+# ---------------------------------------------------------------------------
+
+class _CocoSeqIterator:
+    """Iterator một sequence: yield (frame_id:int, img:(3,H,W)float32, img0:BGR)."""
+
+    def __init__(self, frames, width, height):
+        # frames: list[(frame_id:int, abs_img_path:str)] đã sort theo frame_id
+        self.frames = frames
+        self.width  = width
+        self.height = height
+        self.count  = 0
+        self.nF     = len(frames)
+        self.frame_rate = 10   # tương thích chữ ký LoadImages
+
+    def __iter__(self):
+        self.count = -1
+        return self
+
+    def __next__(self):
+        self.count += 1
+        if self.count == self.nF:
+            raise StopIteration
+        frame_id, img_path = self.frames[self.count]
+        img0 = cv2.imread(img_path)
+        assert img0 is not None, f'Failed to load {img_path}'
+        img = preprocess_for_tracking(img0, self.width, self.height)
+        return frame_id, img, img0
+
+    def __len__(self):
+        return self.nF
+
+
+class LoadCocoSequencesForTracking:
+    """
+    Nguồn dữ liệu tracking lấy từ COCO JSON (đồng bộ với VisDroneCocoDataset).
+
+    Args:
+        ann_file : đường dẫn instances_*.json (ví dụ val_ann trong visdrone_coco.json)
+        img_root : thư mục ảnh đã convert (ví dụ val_img); file_name trong JSON là
+                   '<seq>/<frame:07d>.jpg' nối với img_root.
+        img_size : (W, H) — phải khớp --input-wh khi train.
+
+    Dùng:
+        src = LoadCocoSequencesForTracking(ann_file, img_root, img_size=(W, H))
+        for seq_id in src.seqs:
+            loader = src.sequence(seq_id)      # iterable -> (frame_id, img, img0)
+            runner.run(loader, result_path)
+    """
+
+    def __init__(self, ann_file: str, img_root: str, img_size=(896, 512)):
+        self.width  = img_size[0]
+        self.height = img_size[1]
+        self.img_root = img_root
+
+        with open(ann_file, 'r') as f:
+            coco = json.load(f)
+
+        # seq_id -> list[(frame_id:int, abs_img_path:str)]
+        seq_frames = defaultdict(list)
+        for img in coco['images']:
+            seq = img.get('seq_id')
+            if seq is None:
+                # fallback: suy seq từ file_name '<seq>/<frame>.jpg'
+                seq = os.path.dirname(img['file_name']) or '_root'
+            fr_id    = int(img.get('frame_id', 0))
+            abs_path = os.path.join(img_root, img['file_name'])
+            seq_frames[seq].append((fr_id, abs_path))
+
+        # sort từng seq theo frame_id thật
+        self._seq_frames = {
+            seq: sorted(frs, key=lambda t: t[0])
+            for seq, frs in seq_frames.items()
+        }
+        # thứ tự seq ổn định
+        self.seqs = sorted(self._seq_frames.keys())
+
+        total = sum(len(v) for v in self._seq_frames.values())
+        print(f'[LoadCocoSequencesForTracking] {len(self.seqs)} sequences  '
+              f'{total} frames  from {os.path.basename(ann_file)}')
+
+    def sequence(self, seq_id: str) -> _CocoSeqIterator:
+        """Trả về iterator cho một sequence."""
+        frames = self._seq_frames[seq_id]
+        return _CocoSeqIterator(frames, self.width, self.height)
+
+    def num_frames(self, seq_id: str) -> int:
+        return len(self._seq_frames[seq_id])

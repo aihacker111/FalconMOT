@@ -34,7 +34,10 @@ from falconmot.tracking_utils.io import set_eval_mode
 from falconmot.tracking_utils.log import logger
 from falconmot.tracking_utils.timer import Timer
 from falconmot.tracking_utils.utils import mkdir_if_missing
-from falconmot.datasets.dataset.coco_detection import LoadImagesForTracking
+from falconmot.datasets.dataset.coco_detection import (
+    LoadImagesForTracking,
+    LoadCocoSequencesForTracking,
+)
 from falconmot.opts import opts
 
 # Must match io.py._CLS_ID_OFFSET
@@ -90,7 +93,8 @@ class SequenceRunner:
             conf_thres      = opt.conf_thres,
             use_focal_loss  = True,
         )
-        self.postprocessor.set_net_hw(net_h, net_w)
+        # No-letterbox full flow: box decode dùng simple-scale theo orig_size.
+        # KHÔNG gọi set_net_hw (đã thành no-op) — tránh hiểu nhầm còn letterbox.
 
         self.tracker     = FalconTracker(opt, frame_rate)
         self.timer       = Timer()
@@ -167,11 +171,14 @@ class SequenceRunner:
         self.tracker.reset()   # clear state from previous sequence
         self.timer       = Timer()
         self._orig_sizes = None
-        frame_id         = 0
+        counter          = 0
 
         with open(result_path, 'w') as f_out:
-            for _, img, img0 in data_loader:
-                frame_id += 1
+            for meta, img, img0 in data_loader:
+                counter += 1
+                # COCO loader trả frame_id THẬT (int) để khớp GT của Evaluator;
+                # LoadImagesForTracking trả img_path (str) → dùng bộ đếm tuần tự.
+                frame_id = meta if isinstance(meta, int) else counter
                 orig_h, orig_w = img0.shape[:2]
 
                 # Cache orig_sizes — constant within a sequence
@@ -275,9 +282,67 @@ def main(opt, data_root: str, ann_root: str, seqs,
     Evaluator.save_summary(summary, osp.join(result_root, f'summary_{exp_name}.xlsx'))
 
 
+def _summarize(accs, seqs, timer_avgs, timer_calls, result_root, exp_name):
+    """In FPS + bảng motmetrics + lưu xlsx (dùng chung cho mọi nguồn dữ liệu)."""
+    timer_avgs  = np.asarray(timer_avgs)
+    timer_calls = np.asarray(timer_calls)
+    all_time    = np.dot(timer_avgs, timer_calls)
+    avg_fps     = 1.0 / max(all_time / max(np.sum(timer_calls), 1), 1e-5)
+    logger.info('Total time %.2fs  FPS %.2f', all_time, avg_fps)
+
+    metrics    = mm.metrics.motchallenge_metrics
+    mh         = mm.metrics.create()
+    summary    = Evaluator.get_summary(accs, seqs, metrics)
+    strsummary = mm.io.render_summary(
+        summary,
+        formatters = mh.formatters,
+        namemap    = mm.io.motchallenge_metric_names,
+    )
+    print(strsummary)
+    Evaluator.save_summary(summary, osp.join(result_root, f'summary_{exp_name}.xlsx'))
+
+
 # ---------------------------------------------------------------------------
-# Entry point
+# main_coco — nguồn dữ liệu lấy TỪ COCO JSON (đồng bộ với coco_detection/training)
 # ---------------------------------------------------------------------------
+
+def main_coco(opt, ann_file: str, img_root: str, gt_root: str,
+              exp_name: str, save_images: bool = False, show_image: bool = False):
+    """
+    Tracking dùng đúng dataset của training:
+      * ảnh + danh sách seq/frame lấy từ COCO JSON (ann_file, img_root)
+      * tiền xử lý y hệt val (plain resize + /255, no letterbox)
+      * GT để đánh giá vẫn đọc từ annotation VisDrone thô (gt_root/<seq>.txt) —
+        toạ độ trùng với COCO nên MOTA/IDF1 không đổi; frame_id khớp do loader
+        trả về frame_id thật.
+    """
+    logger.setLevel(logging.INFO)
+
+    result_root = osp.join(osp.dirname(img_root.rstrip('/')), 'results', exp_name)
+    mkdir_if_missing(result_root)
+
+    src    = LoadCocoSequencesForTracking(ann_file, img_root, opt.img_size)
+    runner = SequenceRunner(opt)
+    accs, timer_avgs, timer_calls = [], [], []
+
+    for seq in src.seqs:
+        logger.info('start seq: %s (%d frames)', seq, src.num_frames(seq))
+
+        output_dir = (osp.join(result_root, 'outputs', seq) if save_images else None)
+        dataloader      = src.sequence(seq)
+        result_filename = osp.join(result_root, f'{seq}.txt')
+
+        nf, ta, tc = runner.run(
+            dataloader, result_filename,
+            save_dir=output_dir, show_image=show_image,
+        )
+        timer_avgs.append(ta)
+        timer_calls.append(tc)
+
+        logger.info('Evaluate seq: %s', seq)
+        accs.append(Evaluator(gt_root, seq, 'mot').eval_file(result_filename))
+
+    _summarize(accs, src.seqs, timer_avgs, timer_calls, result_root, exp_name)
 
 if __name__ == '__main__':
     opt = opts().init()
@@ -301,15 +366,41 @@ if __name__ == '__main__':
     if not opt.test_visdrone:
         raise ValueError('No test dataset configured. Set --test_visdrone.')
 
-    data_root = osp.join(opt.data_dir, 'VisDrone2019/test_dev/sequences')
-    ann_root  = osp.join(opt.data_dir, 'VisDrone2019/test_dev/annotations')
+    if getattr(opt, 'track_from_coco', True):
+        # ── Nguồn tracking = COCO JSON (đồng bộ với coco_detection/training) ──
+        import json as _json
+        ann_file = opt.track_ann_file
+        img_root = opt.track_img_root
+        if not ann_file or not img_root:
+            with open(opt.data_cfg) as _f:
+                _cfg = _json.load(_f)
+            ann_file = ann_file or _cfg['val_ann']   # COCO JSON chỉ có train/val
+            img_root = img_root or _cfg['val_img']
+        gt_root = opt.track_gt_root
+        if not gt_root:
+            raise ValueError(
+                'Cần --track_gt_root: thư mục annotation VisDrone thô của split '
+                'tracking (vd .../VisDrone2019-MOT-val/annotations) để Evaluator dựng GT.')
+        main_coco(
+            opt,
+            ann_file    = ann_file,
+            img_root    = img_root,
+            gt_root     = gt_root,
+            exp_name    = 'ecdet_visdrone',
+            show_image  = False,
+            save_images = True,
+        )
+    else:
+        # ── Fallback: nguồn thô từ test_dev/sequences (KHÔNG đồng bộ blackout) ──
+        data_root = osp.join(opt.data_dir, 'VisDrone2019/test_dev/sequences')
+        ann_root  = osp.join(opt.data_dir, 'VisDrone2019/test_dev/annotations')
 
-    main(
-        opt,
-        data_root   = data_root,
-        ann_root    = ann_root,
-        seqs        = _VISDRONE_SEQS,
-        exp_name    = 'ecdet_visdrone',
-        show_image  = False,
-        save_images = True,
-    )
+        main(
+            opt,
+            data_root   = data_root,
+            ann_root    = ann_root,
+            seqs        = _VISDRONE_SEQS,
+            exp_name    = 'ecdet_visdrone',
+            show_image  = False,
+            save_images = True,
+        )
