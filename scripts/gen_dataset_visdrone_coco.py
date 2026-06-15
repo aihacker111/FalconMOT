@@ -230,7 +230,7 @@ def main():
     ap.add_argument('--visdrone_root', default='/workspace')
     ap.add_argument('--output_root',   default='/workspace/VisDrone2019-COCO')
     ap.add_argument('--splits', nargs='+', default=['train', 'val'],
-                    choices=['train', 'val'])
+                    choices=['train', 'val', 'test-dev'])
     ap.add_argument('--workers', type=int, default=4,
                     help='parallel threads for image I/O per sequence')
     args = ap.parse_args()
