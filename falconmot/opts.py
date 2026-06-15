@@ -199,7 +199,7 @@ class opts(object):
         self.parser.add_argument('--gridmask_prob', type=float, default=0.3,
                                  help='probability of applying gridmask per sample')
         # Random perspective (homography) warp — synthetic viewpoint augment
-        self.parser.add_argument('--homography', action='store_true', default=True,
+        self.parser.add_argument('--homography', action='store_true', default=False,
                                  help='random perspective warp (alt to affine) for viewpoint diversity')
         self.parser.add_argument('--no_homography', dest='homography', action='store_false')
         self.parser.add_argument('--homography_prob', type=float, default=0.3,
