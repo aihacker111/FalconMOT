@@ -1430,8 +1430,9 @@ def run(opt):
 
     in_phase1 = start_epoch >= warmup_ep
     if in_phase1:
-        stage_mgr.apply_phase1(model, keep_backbone_frozen=getattr(
-            opt, 'keep_backbone_frozen', True))
+        stage_mgr.apply_phase1(model,
+                               keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', True),
+                               freeze_norm=getattr(opt, 'freeze_norm_stats', True))
         init_lr = opt.lr
     else:
         stage_mgr.apply_phase0(model)
@@ -1480,8 +1481,9 @@ def run(opt):
         # ── Phase 0 -> Phase 1 transition (exactly once, at the boundary) ──────
         if (not in_phase1) and epoch > warmup_ep:
             in_phase1 = True
-            stage_mgr.apply_phase1(model, keep_backbone_frozen=getattr(
-                opt, 'keep_backbone_frozen', True))
+            stage_mgr.apply_phase1(model,
+                                   keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', True),
+                                   freeze_norm=getattr(opt, 'freeze_norm_stats', True))
             # set of trainable params changed -> rebuild optimizer (+criterion params)
             optimizer = stage_mgr.build_phase_optimizer(
                 model, trainer.loss, opt, build_optimizer, lr=opt.lr)

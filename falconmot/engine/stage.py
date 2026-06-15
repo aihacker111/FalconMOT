@@ -16,6 +16,28 @@ from __future__ import absolute_import, division, print_function
 
 import copy
 import torch
+import torch.nn as nn
+
+_BN_TYPES = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d)
+
+
+def freeze_bn_stats(module, tag=''):
+    """
+    Lock BatchNorm running-stats (keep them in eval) while leaving the BN
+    affine weights (gamma/beta) trainable. Standard detection-finetune trick:
+    prevents eval-time degradation when the stage-2 augmentation distribution
+    differs from the clean eval distribution.
+    """
+    n = 0
+    for m in module.modules():
+        if isinstance(m, _BN_TYPES):
+            m.eval()
+            m.__dict__['train'] = (lambda _m: (lambda mode=True: _m))(m)  # stay eval
+            n += 1
+    if tag and n:
+        print(f'  [stage] {tag:<10}: BN running-stats LOCKED ({n} BN layers), '
+              f'affine weights still trainable')
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +94,10 @@ def apply_phase0(model):
     _report(model)
 
 
-def apply_phase1(model, keep_backbone_frozen: bool = True):
-    """Unfreeze encoder + decoder (+ S4). Optionally keep backbone frozen."""
+def apply_phase1(model, keep_backbone_frozen: bool = True, freeze_norm: bool = True):
+    """Unfreeze encoder + decoder (+ S4). Optionally keep backbone frozen.
+    If freeze_norm, BatchNorm running-stats in encoder/S4 stay locked (eval) to
+    avoid eval-time drift under heavy augmentation, while their weights train."""
     print('[stage] === Phase 1: joint fine-tune ===')
     m = _core(model)
     _set_module_trainable(m.backbone, not keep_backbone_frozen, 'backbone')
@@ -83,6 +107,14 @@ def apply_phase1(model, keep_backbone_frozen: bool = True):
         _set_module_trainable(m.s4_branch, True, 's4_branch')
         _set_module_trainable(m.s4_aux_head, True, 's4_aux_head')
     _set_module_trainable(m.reid_head, True, 'reid_head')
+
+    if freeze_norm:
+        # Call AFTER _set_module_trainable (which re-enables .train()); this
+        # re-locks only the BN running-stats, leaving affine weights trainable.
+        freeze_bn_stats(m.encoder, 'encoder')
+        if getattr(m, 'use_s4', False):
+            freeze_bn_stats(m.s4_branch, 's4_branch')
+            freeze_bn_stats(m.s4_aux_head, 's4_aux_head')
     _report(model)
 
 
