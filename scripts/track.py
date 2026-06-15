@@ -366,7 +366,7 @@ if __name__ == '__main__':
     if not opt.test_visdrone:
         raise ValueError('No test dataset configured. Set --test_visdrone.')
 
-    if getattr(opt, 'track_from_coco', True):
+    if getattr(opt, 'track_from_coco', False):
         # ── Nguồn tracking = COCO JSON (đồng bộ với coco_detection/training) ──
         import json as _json
         ann_file = opt.track_ann_file
