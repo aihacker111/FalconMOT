@@ -976,7 +976,11 @@ def run(opt):
     start_epoch = 0
     if opt.load_model != '':
         # Load stage-1 best model — KHÔNG load optimizer (fine-tuning từ đầu)
-        model, optimizer, start_epoch = load_model(
+        # model, _, start_epoch = load_model(
+        #     model, opt.load_model, optimizer=None, resume=False,
+        #     lr=opt.lr, lr_step=opt.lr_step
+        # )
+        model = load_model(
             model, opt.load_model, optimizer=None, resume=False,
             lr=opt.lr, lr_step=opt.lr_step
         )
