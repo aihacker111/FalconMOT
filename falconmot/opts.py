@@ -98,7 +98,7 @@ class opts(object):
         self.parser.add_argument('--eval_spatial_size', type=int, nargs=2,
                                  default=[480, 864], help='[H, W] for anchor pre-generation')
         # ── Stage-2 two-phase fine-tune ─────────────────────────────────────
-        self.parser.add_argument('--reid_warmup_epochs', type=int, default=2,
+        self.parser.add_argument('--reid_warmup_epochs', type=int, default=0,
                                 help='Phase 0: số epoch chỉ train reid_head + classifiers '
                                     '(detector freeze). 0 = bỏ Phase 0, vào thẳng joint.')
         self.parser.add_argument('--reid_warmup_lr', type=float, default=-1.0,
@@ -108,7 +108,7 @@ class opts(object):
                                 help='Phase 1: giữ backbone freeze (khuyến nghị).')
         self.parser.add_argument('--unfreeze_backbone', dest='keep_backbone_frozen',
                                 action='store_false')
-        self.parser.add_argument('--id_warmup_epochs', type=int, default=2,
+        self.parser.add_argument('--id_warmup_epochs', type=int, default=0,
                                 help='Phase 1: ramp id_weight 0->id_weight qua N epoch đầu.')
         # ── Input resolution ───────────────────────────────────────────────
         self.parser.add_argument('--input-wh', type=int, nargs=2, default=[864, 480],
