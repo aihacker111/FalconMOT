@@ -1345,10 +1345,24 @@ def run(opt):
     from falconmot.datasets.dataset.coco_detection import VisDroneCocoDataset
 
     if use_coco_fmt:
-        train_ann = data_config['train_ann']
-        train_img = data_config['train_img']
-        dataset   = VisDroneCocoDataset(
-            opt=opt, img_root=train_img, ann_file=train_ann, augment=True)
+        # ── Gom nhiều nguồn vào tập train (vd train + val) ────────────────
+        #   Ưu tiên: config['train_sources'] (list) > cờ --merge_val_into_train
+        #   > nguồn đơn train_ann/train_img (mặc định, như cũ).
+        train_sources = data_config.get('train_sources')
+        if not train_sources and getattr(opt, 'merge_val_into_train', False):
+            train_sources = [
+                {'ann': data_config['train_ann'], 'img': data_config['train_img']},
+                {'ann': data_config['val_ann'],   'img': data_config['val_img']},
+            ]
+            print('[data] merge_val_into_train: gộp train + val vào tập train')
+
+        if train_sources:
+            dataset = VisDroneCocoDataset(opt=opt, sources=train_sources, augment=True)
+        else:
+            train_ann = data_config['train_ann']
+            train_img = data_config['train_img']
+            dataset   = VisDroneCocoDataset(
+                opt=opt, img_root=train_img, ann_file=train_ann, augment=True)
     else:
         trainset_paths = data_config['train']
         transforms     = T.Compose([T.ToTensor()])

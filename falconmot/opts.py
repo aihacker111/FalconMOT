@@ -79,6 +79,11 @@ class opts(object):
         # S4 branch (stride-4 for small/distant object detection)
         self.parser.add_argument('--use_s4', action='store_true', default=False,
                                  help='Add stride-4 branch: decoder uses [S4,S8,S16,S32].')
+        # ── Gộp train + val thành một tập train ──────────────────────────
+        self.parser.add_argument('--merge_val_into_train', action='store_true', default=False,
+                                 help='Gộp cả train_ann/img và val_ann/img (từ data_cfg) vào '
+                                      'tập train. Offset image_id/seq_id/track_id để không '
+                                      'va chạm. Lưu ý: không còn val tách biệt để đánh giá.')
         # ── ReID head ────────────────────────────────────────────────────
         self.parser.add_argument('--reid_head_type', default='transformer',
                                  choices=['transformer', 'mlp'],

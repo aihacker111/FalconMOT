@@ -60,7 +60,15 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
     """
 
 
-    def __init__(self, opt, img_root: str, ann_file: str, augment: bool = False):
+    def __init__(self, opt, img_root: str = None, ann_file: str = None,
+                 augment: bool = False, sources=None):
+        """
+        Args:
+            img_root, ann_file : nguồn đơn (cách dùng cũ, tương thích ngược).
+            sources : danh sách nhiều nguồn để GỘP, mỗi phần tử là
+                      (ann_file, img_root) hoặc dict{'ann','img'}.
+                      Dùng để gom train + val vào chung một tập train.
+        """
         self.opt      = opt
         self.augment  = augment
         self.width    = opt.input_wh[0]   # W
@@ -77,27 +85,80 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         stop_epoch      = getattr(opt, 'stop_epoch', -1)
         self.stop_epoch = opt.num_epochs if stop_epoch < 0 else stop_epoch
 
-        # ── Load COCO JSON ────────────────────────────────────────────────
-        with open(ann_file, 'r') as f:
-            coco = json.load(f)
+        # ── Chuẩn hoá danh sách nguồn ─────────────────────────────────────
+        if sources is None:
+            assert ann_file is not None and img_root is not None, \
+                'Cần (ann_file, img_root) hoặc sources=[...]'
+            sources = [(ann_file, img_root)]
+        norm_sources = []
+        for s in sources:
+            if isinstance(s, dict):
+                norm_sources.append((s['ann'], s['img']))
+            else:
+                norm_sources.append((s[0], s[1]))
 
-        self.img_info = {img['id']: img for img in coco['images']}
-        self.img_ids  = [img['id'] for img in coco['images']]
-        self.img_root = img_root
-
+        # ── Gộp nhiều COCO JSON, tránh va chạm id giữa các nguồn ──────────
+        #   • image_id : offset theo max id đã thấy   -> không đè khung hình
+        #   • seq_id   : đặt tiền tố "<src>:"          -> temporal mosaic không
+        #                trộn nhầm frame của train với val
+        #   • track_id : offset PER-CLASS theo số id đã thấy của class đó
+        #                -> KHÔNG hợp nhất hai danh tính khác nhau (giữ ReID đúng)
+        self.img_info = {}                    # gid -> img dict (đã chèn '_img_root')
+        self.img_ids  = []
         self._ann_by_img = defaultdict(list)
-        for ann in coco['annotations']:
-            self._ann_by_img[ann['image_id']].append(ann)
+        self.img_root = norm_sources[0][1]    # fallback root (tương thích ngược)
 
-        # ── nID_dict: per-class unique track ID count (for ArcFace sizing) ──
-        max_tid = defaultdict(int)
-        for ann in coco['annotations']:
-            cls_id_0 = ann['category_id'] - 1
-            tid      = ann['track_id']
-            if tid + 1 > max_tid[cls_id_0]:
-                max_tid[cls_id_0] = tid + 1
+        max_tid     = defaultdict(int)        # số id tích luỹ per-class (= nID_dict)
+        img_offset  = 0
+        total_anns  = 0
+        num_classes = 0
+
+        for src_idx, (ann_file_i, img_root_i) in enumerate(norm_sources):
+            with open(ann_file_i, 'r') as f:
+                coco = json.load(f)
+
+            # snapshot offset track_id per-class TRƯỚC khi cộng nguồn này vào
+            tid_offset = dict(max_tid)
+
+            for img in coco['images']:
+                gid  = img['id'] + img_offset
+                info = dict(img)
+                info['id']         = gid
+                info['_img_root']  = img_root_i              # root riêng từng ảnh
+                if info.get('seq_id') is not None:
+                    info['seq_id'] = f'{src_idx}:{info["seq_id"]}'  # namespace seq
+                self.img_info[gid] = info
+                self.img_ids.append(gid)
+
+            local_max = defaultdict(int)
+            for ann in coco['annotations']:
+                cls0 = ann['category_id'] - 1
+                off  = tid_offset.get(cls0, 0)
+                new_tid = ann['track_id'] + off
+                a = dict(ann)
+                a['image_id'] = ann['image_id'] + img_offset
+                a['track_id'] = new_tid
+                self._ann_by_img[a['image_id']].append(a)
+                if new_tid + 1 > local_max[cls0]:
+                    local_max[cls0] = new_tid + 1
+                total_anns += 1
+
+            # cập nhật số id per-class sau nguồn này
+            for cid, m in local_max.items():
+                if m > max_tid[cid]:
+                    max_tid[cid] = m
+
+            if self.img_ids:
+                img_offset = max(self.img_ids) + 1
+            num_classes = max(num_classes, len(coco['categories']))
+
+            if len(norm_sources) > 1:
+                print(f'[VisDroneCocoDataset] + nguồn[{src_idx}] '
+                      f'{len(coco["images"])} ảnh, {len(coco["annotations"])} ann  '
+                      f'(ann={os.path.basename(ann_file_i)})')
+
         self.nID_dict    = dict(max_tid)
-        self.num_classes = len(coco['categories'])
+        self.num_classes = num_classes
 
         # ── New augmentation flags ────────────────────────────────────────
         # Temporal Mosaic: 4 frames from same sequence → 2×2 mosaic
@@ -124,8 +185,9 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         self._build_seq_index()
 
         print(f'[VisDroneCocoDataset] {len(self.img_ids)} images  '
-              f'{len(coco["annotations"])} annotations  '
-              f'classes={self.num_classes}  augment={augment}')
+              f'{total_anns} annotations  '
+              f'classes={self.num_classes}  augment={augment}  '
+              f'sources={len(norm_sources)}')
         print(f'  temporal_mosaic={self.use_temporal_mosaic}  '
               f'small_obj_zoom={self.use_small_obj_zoom}  '
               f'gridmask={self.use_gridmask}  '
@@ -148,7 +210,7 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
     def _load_raw(self, img_id: int):
         """Return BGR uint8 image + (N,6) [cls_0, tid_0, cx, cy, w, h] norm."""
         info     = self.img_info[img_id]
-        img_path = os.path.join(self.img_root, info['file_name'])
+        img_path = os.path.join(info.get('_img_root', self.img_root), info['file_name'])
         img      = cv2.imread(img_path)
         if img is None:
             raise ValueError(f'Cannot read {img_path}')

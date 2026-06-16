@@ -1,5 +1,12 @@
 {
     "root":      "/workspace/VisDrone2019-COCO",
+    "train_sources": [
+        { "ann": "/workspace/VisDrone2019-COCO/train/annotations/instances_train.json",
+          "img": "/workspace/VisDrone2019-COCO/train/images" },
+        { "ann": "/workspace/VisDrone2019-COCO/val/annotations/instances_val.json",
+          "img": "/workspace/VisDrone2019-COCO/val/images" }
+    ],
+
     "train_ann": "/workspace/VisDrone2019-COCO/train/annotations/instances_train.json",
     "train_img": "/workspace/VisDrone2019-COCO/train/images",
     "val_ann":   "/workspace/VisDrone2019-COCO/val/annotations/instances_val.json",
