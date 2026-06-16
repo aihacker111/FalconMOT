@@ -164,6 +164,7 @@ class FalconJDEModel(nn.Module):
         decoder:  DEIMTransformer,
         reid_dim: int  = 128,
         use_s4:   bool = False,
+        use_s4_aux: bool = True,
         sta_dim:  int  = 0,
         use_reid: bool = True,
         reid_head_type: str = 'transformer',
@@ -174,6 +175,7 @@ class FalconJDEModel(nn.Module):
         self.encoder   = encoder
         self.decoder   = decoder
         self.use_s4    = use_s4
+        self.use_s4_aux = use_s4_aux
         self.use_reid  = use_reid
         self.reid_head_type = reid_head_type
 
@@ -209,7 +211,7 @@ class FalconJDEModel(nn.Module):
 
         out = self.decoder(dec_feats, targets)
 
-        if self.use_s4 and self.training:
+        if self.use_s4 and self.use_s4_aux and self.training:
             out['pred_s4_aux'] = self.s4_aux_head(p2)   # aux objectness trên P2
         if 'eval_hs' in out:
             hs = out.pop('eval_hs')
@@ -398,7 +400,10 @@ def build_falcon_jde(opt) -> FalconJDEModel:
 
     model = FalconJDEModel(
         backbone, encoder, decoder,
-        reid_dim=reid_dim, use_s4=use_s4, sta_dim=sta_dim,
+        reid_dim=reid_dim,
+        use_s4=use_s4,
+        use_s4_aux=getattr(opt, 'use_s4_aux', True),
+        sta_dim=sta_dim,
         reid_head_type=getattr(opt, 'reid_head_type', 'transformer'),
         reid_num_points=getattr(opt, 'reid_num_points', 8),
     )

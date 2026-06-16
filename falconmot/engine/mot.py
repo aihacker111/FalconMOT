@@ -31,14 +31,16 @@ def _build_criterion(opt) -> FalconJDECriterion:
     use_prox     = getattr(opt, 'prox_reid', False)
     prox_weight  = getattr(opt, 'prox_weight', 0.5)
     use_s4       = getattr(opt, 'use_s4', False)
+    use_s4_aux   = use_s4 and getattr(opt, 'use_s4_aux', True)
 
     # DETR-style detection loss: loss_cls + loss_bbox + loss_giou
     weight_dict = {
         'loss_cls':  2.0,
         'loss_bbox': 5.0,
         'loss_giou': 2.0,
-        'loss_s4_aux': 1.0
     }
+    if use_s4_aux:
+        weight_dict['loss_s4_aux'] = 1.0
     if use_rep:
         weight_dict['loss_rep'] = rep_weight
     if use_prox:
@@ -47,7 +49,7 @@ def _build_criterion(opt) -> FalconJDECriterion:
     base_losses = ['focal', 'boxes']
     if use_rep:
         base_losses.append('rep')
-    if use_s4:
+    if use_s4_aux:
         base_losses.append('s4_aux')
     losses = tuple(base_losses)
 
@@ -112,7 +114,7 @@ class MotTrainer(BaseTrainer):
                 and getattr(opt, 'id_weight', 1.0) > 0:
             loss_states.append('loss_prox_reid')
         loss_states += ['loss_cls', 'loss_bbox', 'loss_giou']
-        if getattr(opt, 'use_s4', False):
+        if getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True):
             loss_states.append('loss_s4_aux')
         if getattr(opt, 'rep', False):
             loss_states.append('loss_rep')

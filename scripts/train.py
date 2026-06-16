@@ -1285,9 +1285,10 @@ def _print_stage1_banner(opt):
     es = getattr(opt, 'eval_spatial_size', [h, w])
     print('=' * 72)
     print('Stage-1 detection-only training  (--train_single_det)')
-    print(f'  input {w}x{h}  eval_spatial_size={es}  use_s4={getattr(opt, "use_s4", False)}')
+    print(f'  input {w}x{h}  eval_spatial_size={es}  use_s4={getattr(opt, "use_s4", False)} '
+          f'use_s4_aux={getattr(opt, "use_s4_aux", True)}')
     print(f'  losses: cls + bbox + giou'
-          f"{' + s4_aux' if getattr(opt, 'use_s4', False) else ''}  |  "
+          f"{' + s4_aux' if (getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True)) else ''}  |  "
           f'ReID: OFF')
     print(f'  aug: mosaic={getattr(opt, "mosaic", False)} '
           f'(p={getattr(opt, "mosaic_prob", 0.5)})  '
@@ -1301,6 +1302,7 @@ def _print_stage1_banner(opt):
 def _summarize_model(model, opt):
     core = model.module if hasattr(model, 'module') else model
     print(f'[model] use_s4={getattr(core, "use_s4", False)}  '
+          f'use_s4_aux={getattr(core, "use_s4_aux", True)}  '
           f'use_reid={getattr(core, "use_reid", True)}  '
           f's4_branch={hasattr(core, "s4_branch")}  '
           f'reid_head={hasattr(core, "reid_head")}')

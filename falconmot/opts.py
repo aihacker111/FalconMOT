@@ -80,6 +80,10 @@ class opts(object):
         # S4 branch (stride-4 for small/distant object detection)
         self.parser.add_argument('--use_s4', action='store_true', default=False,
                                  help='Add stride-4 branch: decoder uses [S4,S8,S16,S32].')
+        self.parser.add_argument('--use_s4_aux', action='store_true', default=True,
+                                 help='enable S4 auxiliary heatmap loss head during training')
+        self.parser.add_argument('--no_s4_aux', dest='use_s4_aux', action='store_false',
+                                 help='disable S4 auxiliary loss/head; no aux gradient')
         # ── Gộp train + val thành một tập train ──────────────────────────
         self.parser.add_argument('--merge_val_into_train', action='store_true', default=False,
                                  help='Gộp cả train_ann/img và val_ann/img (từ data_cfg) vào '
@@ -304,7 +308,7 @@ class opts(object):
             opt.prox_reid          = False
             opt.reid_warmup_epochs = 0
             opt.id_warmup_epochs   = 0
-            s4_tag = '+s4_aux' if getattr(opt, 'use_s4', False) else ''
+            s4_tag = '+s4_aux' if (getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True)) else ''
             print('[train_single_det] stage-1 detection-only: '
                   f'ReID head OFF | losses: cls+bbox+giou{s4_tag} | '
                   f'use_s4={getattr(opt, "use_s4", False)} | '
