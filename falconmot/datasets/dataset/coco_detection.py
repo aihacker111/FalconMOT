@@ -134,7 +134,7 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
             for ann in coco['annotations']:
                 cls0 = ann['category_id'] - 1
                 off  = tid_offset.get(cls0, 0)
-                new_tid = ann['track_id'] + off
+                new_tid = ann.get('track_id', 0) + off
                 a = dict(ann)
                 a['image_id'] = ann['image_id'] + img_offset
                 a['track_id'] = new_tid
@@ -189,11 +189,15 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
               f'classes={self.num_classes}  augment={augment}  '
               f'sources={len(norm_sources)}')
         print(f'  temporal_mosaic={self.use_temporal_mosaic}  '
+              f'mosaic={self.use_mosaic}  '
               f'small_obj_zoom={self.use_small_obj_zoom}  '
               f'gridmask={self.use_gridmask}  '
               f'seq_index={self._has_seq_idx} ({len(self._seq_to_ids)} seqs)')
-        for cid, n in sorted(self.nID_dict.items()):
-            print(f'  class {cid}: {n} unique IDs')
+        if getattr(opt, 'train_single_det', False):
+            print('  [train_single_det] track_ids ignored (detection-only)')
+        else:
+            for cid, n in sorted(self.nID_dict.items()):
+                print(f'  class {cid}: {n} unique IDs')
 
     # ------------------------------------------------------------------
 
@@ -222,7 +226,7 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
             x1, y1, bw, bh = ann['bbox']
             labels[i] = [
                 ann['category_id'] - 1,   # cls  0-indexed
-                ann['track_id'],           # tid  0-indexed global
+                ann.get('track_id', 0),    # tid  0-indexed global (0 for DET)
                 (x1 + bw * 0.5) / W,      # cx   normalized
                 (y1 + bh * 0.5) / H,      # cy   normalized
                 bw / W,                    # w    normalized

@@ -19,7 +19,7 @@ import torchvision
 
 from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
 from .matcher import HungarianMatcher
-
+from .feat_fusion import build_center_heatmaps, gaussian_focal_loss
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,6 +111,7 @@ class FalconJDECriterion(nn.Module):
         reg_max:             int   = 32,
         boxes_weight_format: str   = None,
         use_uni_set:         bool  = True,
+        use_reid:            bool  = True,
         id_weight:           float = 1.0,
         use_triplet:         bool  = False,
         use_arcface:         bool  = True,
@@ -131,6 +132,7 @@ class FalconJDECriterion(nn.Module):
         self.reg_max             = reg_max
         self.boxes_weight_format = boxes_weight_format
         self.use_uni_set         = use_uni_set
+        self.use_reid            = use_reid
         self.id_weight           = id_weight
         self.use_triplet         = use_triplet
         self.use_arcface         = use_arcface
@@ -144,22 +146,23 @@ class FalconJDECriterion(nn.Module):
             'loss_cls':  2.0,
             'loss_bbox': 5.0,
             'loss_giou': 2.0,
-            'loss_s4_aux':  0.5
+            'loss_s4_aux': 1.0
         }
 
         # Per-class classifiers: ArcFace (margin-based) or Linear (plain CE+Triplet)
-        if use_arcface:
-            self.classifiers = nn.ModuleDict({
-                str(cls_id): ArcFace(reid_dim, nid)
-                for cls_id, nid in nid_dict.items()
-            })
-        else:
-            self.linear_classifiers = nn.ModuleDict({
-                str(cls_id): nn.Linear(reid_dim, nid, bias=False)
-                for cls_id, nid in nid_dict.items()
-            })
-        self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)
-        self.triplet = TripletLoss(margin=0.3)
+        if use_reid:
+            if use_arcface:
+                self.classifiers = nn.ModuleDict({
+                    str(cls_id): ArcFace(reid_dim, nid)
+                    for cls_id, nid in nid_dict.items()
+                })
+            else:
+                self.linear_classifiers = nn.ModuleDict({
+                    str(cls_id): nn.Linear(reid_dim, nid, bias=False)
+                    for cls_id, nid in nid_dict.items()
+                })
+            self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)
+            self.triplet = TripletLoss(margin=0.3)
 
     # ------------------------------------------------------------------
     # Dense heatmap loss (CenterNet-style, on S4 feature map)
@@ -291,43 +294,53 @@ class FalconJDECriterion(nn.Module):
         return {'loss_reid': reid_loss}
 
 
+    # def loss_s4_aux(self, outputs, targets, indices, num_boxes):
+    #     """
+    #     TẠO MỤC TIÊU ĐỘC LẬP & TÍNH LOSS CHO NHÁNH PHỤ STRIDE-4 (S4 AUXILIARY HEAD)
+    #     Cơ chế tiêm mãnh liệt Gradient để duy trì độ nhạy cho các vật thể siêu nhỏ.
+    #     """
+    #     losses = {'loss_s4_aux': torch.tensor(0.0, device=outputs['pred_logits'].device)}
+    #     if 'pred_s4_aux' not in outputs:
+    #         return losses
+
+    #     pred_heatmap = outputs['pred_s4_aux'] # Kích thước hình học: (B, 1, H/4, W/4)
+    #     B, _, H_s4, W_s4 = pred_heatmap.shape
+        
+    #     # Khởi tạo bản đồ nhị phân mục tiêu rỗng
+    #     target_heatmap = torch.zeros_like(pred_heatmap)
+
+    #     for b in range(B):
+    #         tgt_boxes = targets[b]['boxes'] # Lấy tọa độ chuẩn hóa [cx, cy, w, h] trong khoảng [0, 1]
+    #         if len(tgt_boxes) == 0:
+    #             continue
+
+    #         # Ánh xạ tọa độ chuẩn hóa về chiều không gian lưới rời rạc của bản đồ Stride-4
+    #         cx = tgt_boxes[:, 0] * W_s4
+    #         cy = tgt_boxes[:, 1] * H_s4
+    #         w  = tgt_boxes[:, 2] * W_s4
+    #         h  = tgt_boxes[:, 3] * H_s4
+
+    #         x1 = (cx - w * 0.5).long().clamp(0, W_s4 - 1)
+    #         y1 = (cy - h * 0.5).long().clamp(0, H_s4 - 1)
+    #         x2 = (cx + w * 0.5).long().clamp(0, W_s4 - 1)
+    #         y2 = (cy + h * 0.5).long().clamp(0, H_s4 - 1)
+
+    #         # Điền giá trị 1.0 vào các pixel nằm bên trong vùng bounding box của vật thể
+    #         for idx in range(len(tgt_boxes)):
+    #             target_heatmap[b, 0, y1[idx]:y2[idx] + 1, x1[idx]:x2[idx] + 1] = 1.0
+
+    #     # Áp dụng hàm phạt BCE Loss có trọng số ổn định số học cao
+    #     losses['loss_s4_aux'] = F.binary_cross_entropy_with_logits(pred_heatmap, target_heatmap, reduction='mean')
+    #     return losses
     def loss_s4_aux(self, outputs, targets, indices, num_boxes):
-        """
-        TẠO MỤC TIÊU ĐỘC LẬP & TÍNH LOSS CHO NHÁNH PHỤ STRIDE-4 (S4 AUXILIARY HEAD)
-        Cơ chế tiêm mãnh liệt Gradient để duy trì độ nhạy cho các vật thể siêu nhỏ.
-        """
-        losses = {'loss_s4_aux': torch.tensor(0.0, device=outputs['pred_logits'].device)}
+        dev = outputs['pred_logits'].device
+        losses = {'loss_s4_aux': torch.tensor(0.0, device=dev)}
         if 'pred_s4_aux' not in outputs:
             return losses
-
-        pred_heatmap = outputs['pred_s4_aux'] # Kích thước hình học: (B, 1, H/4, W/4)
-        B, _, H_s4, W_s4 = pred_heatmap.shape
-        
-        # Khởi tạo bản đồ nhị phân mục tiêu rỗng
-        target_heatmap = torch.zeros_like(pred_heatmap)
-
-        for b in range(B):
-            tgt_boxes = targets[b]['boxes'] # Lấy tọa độ chuẩn hóa [cx, cy, w, h] trong khoảng [0, 1]
-            if len(tgt_boxes) == 0:
-                continue
-
-            # Ánh xạ tọa độ chuẩn hóa về chiều không gian lưới rời rạc của bản đồ Stride-4
-            cx = tgt_boxes[:, 0] * W_s4
-            cy = tgt_boxes[:, 1] * H_s4
-            w  = tgt_boxes[:, 2] * W_s4
-            h  = tgt_boxes[:, 3] * H_s4
-
-            x1 = (cx - w * 0.5).long().clamp(0, W_s4 - 1)
-            y1 = (cy - h * 0.5).long().clamp(0, H_s4 - 1)
-            x2 = (cx + w * 0.5).long().clamp(0, W_s4 - 1)
-            y2 = (cy + h * 0.5).long().clamp(0, H_s4 - 1)
-
-            # Điền giá trị 1.0 vào các pixel nằm bên trong vùng bounding box của vật thể
-            for idx in range(len(tgt_boxes)):
-                target_heatmap[b, 0, y1[idx]:y2[idx] + 1, x1[idx]:x2[idx] + 1] = 1.0
-
-        # Áp dụng hàm phạt BCE Loss có trọng số ổn định số học cao
-        losses['loss_s4_aux'] = F.binary_cross_entropy_with_logits(pred_heatmap, target_heatmap, reduction='mean')
+        pred = outputs['pred_s4_aux']                 # [B,1,H4,W4] logit
+        _, _, H, W = pred.shape
+        gt = build_center_heatmaps(targets, H, W, dev)
+        losses['loss_s4_aux'] = gaussian_focal_loss(pred, gt)
         return losses
     # ------------------------------------------------------------------
     # Mask loss (AMOT DiceLoss adaptation for DETR query-based paradigm)
@@ -561,7 +574,7 @@ class FalconJDECriterion(nn.Module):
                 _apply(aux, targets, indices_dn, indices_dn, dn_nb, dn_nb, '_dn_pre')
 
         # ReID loss
-        if self.id_weight > 0:
+        if self.use_reid and self.id_weight > 0:
             reid_dict = self.loss_reid(outputs, targets, indices)
             losses.update({k: v * self.id_weight for k, v in reid_dict.items()})
 

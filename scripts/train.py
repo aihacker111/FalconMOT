@@ -1277,6 +1277,39 @@ def build_scheduler(optimizer, opt, steps_per_epoch: int):
     )
 
 
+def _print_stage1_banner(opt):
+    """Log key settings for --train_single_det stage-1 runs."""
+    if not getattr(opt, 'train_single_det', False):
+        return
+    w, h = opt.input_wh[0], opt.input_wh[1]
+    es = getattr(opt, 'eval_spatial_size', [h, w])
+    print('=' * 72)
+    print('Stage-1 detection-only training  (--train_single_det)')
+    print(f'  input {w}x{h}  eval_spatial_size={es}  use_s4={getattr(opt, "use_s4", False)}')
+    print(f'  losses: cls + bbox + giou'
+          f"{' + s4_aux' if getattr(opt, 'use_s4', False) else ''}  |  "
+          f'ReID: OFF')
+    print(f'  aug: mosaic={getattr(opt, "mosaic", False)} '
+          f'(p={getattr(opt, "mosaic_prob", 0.5)})  '
+          f'temporal_mosaic=OFF')
+    if getattr(opt, 'deim_pretrained', ''):
+        print(f'  deim_pretrained: {opt.deim_pretrained}')
+    print('  stage-2: load checkpoint WITHOUT --train_single_det')
+    print('=' * 72)
+
+
+def _summarize_model(model, opt):
+    core = model.module if hasattr(model, 'module') else model
+    print(f'[model] use_s4={getattr(core, "use_s4", False)}  '
+          f'use_reid={getattr(core, "use_reid", True)}  '
+          f's4_branch={hasattr(core, "s4_branch")}  '
+          f'reid_head={hasattr(core, "reid_head")}')
+    if getattr(opt, 'train_single_det', False) and getattr(opt, 'use_s4', False) \
+            and getattr(opt, 'deim_pretrained', ''):
+        print('[model] NOTE: s4_branch/s4_aux_head not in DEIM pretrained — '
+              'trained from scratch in stage-1.')
+
+
 @torch.no_grad()
 def run_coco_eval(model, val_loader, opt, ann_file: str = '') -> dict:
     """
@@ -1329,6 +1362,7 @@ def run_coco_eval(model, val_loader, opt, ann_file: str = '') -> dict:
 
 
 def run(opt):
+    _print_stage1_banner(opt)
     torch.manual_seed(opt.seed)
     torch.backends.cudnn.benchmark = not opt.not_cuda_benchmark and not opt.test
 
@@ -1462,6 +1496,7 @@ def run(opt):
 
     print('Creating model...')
     model = create_model(opt.arch, opt)
+    _summarize_model(model, opt)
 
     # ── Load stage-1 weights (weights only) BEFORE applying the freeze policy ──
     start_epoch = 0
@@ -1477,17 +1512,19 @@ def run(opt):
             except Exception:
                 start_epoch = 0
 
-    # ── Two-phase staged fine-tune ────────────────────────────────────────────
-    #   Phase 0 (epochs 1..warmup_ep): freeze detector, train reid_head + classifiers
-    #   Phase 1 (warmup_ep+1..end)   : unfreeze encoder+decoder, keep backbone frozen
+    # ── Training stage policy ─────────────────────────────────────────────────
+    #   Stage-1 (--train_single_det): full detector, no ReID head/loss
+    #   Stage-2 (default): Phase 0 ReID warmup → Phase 1 joint fine-tune
+    det_only  = getattr(opt, 'train_single_det', False)
     warmup_ep = max(0, getattr(opt, 'reid_warmup_epochs', 0))
     p0_lr     = opt.lr if getattr(opt, 'reid_warmup_lr', -1) <= 0 else opt.reid_warmup_lr
 
-    in_phase1 = start_epoch >= warmup_ep
-    if in_phase1:
+    in_phase1 = det_only or start_epoch >= warmup_ep
+    if det_only:
+        stage_mgr.apply_det_only(model)
+        init_lr = opt.lr
+    elif in_phase1:
         stage_mgr.apply_phase1(model,
-                            #    keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', False),
-                            #    freeze_norm=getattr(opt, 'freeze_norm_stats', False))
                               keep_backbone_frozen=False,
                               freeze_norm=False)
         init_lr = opt.lr
@@ -1535,8 +1572,8 @@ def run(opt):
     for epoch in range(start_epoch + 1, opt.num_epochs + 1):
         mark = epoch if opt.save_all else 'last'
 
-        # ── Phase 0 -> Phase 1 transition (exactly once, at the boundary) ──────
-        if (not in_phase1) and epoch > warmup_ep:
+        # ── Phase 0 -> Phase 1 transition (stage-2 only) ─────────────────────
+        if (not det_only) and (not in_phase1) and epoch > warmup_ep:
             in_phase1 = True
             stage_mgr.apply_phase1(model,
                                    keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', True),
@@ -1552,15 +1589,18 @@ def run(opt):
                 warmup_iters=min(getattr(opt, 'warmup_iters', 2000), steps_per_epoch))
             print(f'[stage] >>> switched to Phase 1 (joint) at epoch {epoch}')
 
-        # ── id_weight schedule ─────────────────────────────────────────────────
-        if in_phase1:
+        # ── id_weight schedule (stage-2 only) ────────────────────────────────
+        if det_only:
+            trainer.loss.id_weight = 0.0
+        elif in_phase1:
             ep_in_p1 = epoch - warmup_ep
             stage_mgr.ramp_id_weight(trainer.loss, opt.id_weight,
                                      ep_in_p1, getattr(opt, 'id_warmup_epochs', 0))
         else:
             # Phase 0: detector is frozen, let ReID learn at full strength
             trainer.loss.id_weight = opt.id_weight
-        logger.write('id_w {:.3f} | '.format(trainer.loss.id_weight))
+        if not det_only:
+            logger.write('id_w {:.3f} | '.format(trainer.loss.id_weight))
 
         # notify dataset of current epoch (0-indexed, matching EdgeCrafter convention)
         train_loader.dataset.set_epoch(epoch - 1)

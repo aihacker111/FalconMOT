@@ -13,8 +13,9 @@ class opts(object):
         # ── Basic ──────────────────────────────────────────────────────────
         self.parser.add_argument('--task',     default='mot',  help='mot')
         self.parser.add_argument('--train_single_det', action='store_true', default=False,
-                                 help='detection-only mode for VisDrone-DET (no track IDs): '
-                                      'disables ReID loss + temporal mosaic. Toggle on/off easily.')
+                                 help='Stage-1 detection-only training (VisDrone-DET): no ReID head, '
+                                      'no ReID loss, no temporal mosaic. Save checkpoint, then run '
+                                      'stage-2 tracking fine-tune with --load_model (no flag).')
         self.parser.add_argument('--dataset',  default='coco',
                                  help='coco (COCO JSON format) | jde (legacy JDE index files)')
         self.parser.add_argument('--exp_id',   default='default')
@@ -295,11 +296,21 @@ class opts(object):
         opt.debug_dir = os.path.join(opt.save_dir, 'debug')
         print('Output will be saved to', opt.save_dir)
 
-        # train_single_det: VisDrone-DET has no identities → detection-only.
+        # Stage-1 detection-only: VisDrone-DET has no track IDs.
         if opt.train_single_det:
-            opt.id_weight       = 0.0     # disable ReID loss (loss_cls/bbox/giou only)
-            opt.temporal_mosaic = False   # DET has no sequences
-            print('[train_single_det] detection-only: ReID OFF, temporal_mosaic OFF')
+            opt.use_reid           = False
+            opt.id_weight          = 0.0
+            opt.temporal_mosaic    = False
+            opt.prox_reid          = False
+            opt.reid_warmup_epochs = 0
+            opt.id_warmup_epochs   = 0
+            s4_tag = '+s4_aux' if getattr(opt, 'use_s4', False) else ''
+            print('[train_single_det] stage-1 detection-only: '
+                  f'ReID head OFF | losses: cls+bbox+giou{s4_tag} | '
+                  f'use_s4={getattr(opt, "use_s4", False)} | '
+                  f'mosaic={getattr(opt, "mosaic", False)} | temporal_mosaic=OFF')
+        else:
+            opt.use_reid = True
 
         if opt.resume and opt.load_model == '':
             base = opt.save_dir[:-4] if opt.save_dir.endswith('TEST') else opt.save_dir
@@ -315,6 +326,8 @@ class opts(object):
 
         for reid_id in opt.reid_cls_ids.split(','):
             if int(reid_id) > opt.num_classes - 1:
+                if getattr(opt, 'train_single_det', False):
+                    break
                 print('[Err]: reid_cls_ids conflicts with num_classes')
                 return
 

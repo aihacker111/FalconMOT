@@ -85,12 +85,30 @@ def _detection_modules(model):
     return mods
 
 
+def _has_reid_head(model):
+    m = _core(model)
+    return getattr(m, 'use_reid', True) and hasattr(m, 'reid_head')
+
+
+def apply_det_only(model):
+    """Stage-1 detection-only: train backbone + encoder + decoder (+ S4), no ReID."""
+    print('[stage] === Stage-1: detection-only (full detector trainable) ===')
+    for tag, mod in _detection_modules(model):
+        _set_module_trainable(mod, True, tag)
+    if _has_reid_head(model):
+        _set_module_trainable(_core(model).reid_head, False, 'reid_head')
+    _report(model)
+
+
 def apply_phase0(model):
     """Freeze whole detection path; leave reid_head trainable."""
     print('[stage] === Phase 0: ReID warmup (detector frozen) ===')
     for tag, mod in _detection_modules(model):
         _set_module_trainable(mod, False, tag)
-    _set_module_trainable(_core(model).reid_head, True, 'reid_head')
+    if _has_reid_head(model):
+        _set_module_trainable(_core(model).reid_head, True, 'reid_head')
+    else:
+        print('  [stage] reid_head: SKIPPED (detection-only model)')
     _report(model)
 
 
@@ -106,7 +124,8 @@ def apply_phase1(model, keep_backbone_frozen: bool = False, freeze_norm: bool = 
     if getattr(m, 'use_s4', False):
         _set_module_trainable(m.s4_branch, True, 's4_branch')
         _set_module_trainable(m.s4_aux_head, True, 's4_aux_head')
-    _set_module_trainable(m.reid_head, True, 'reid_head')
+    if _has_reid_head(model):
+        _set_module_trainable(m.reid_head, True, 'reid_head')
 
     if freeze_norm:
         # Call AFTER _set_module_trainable (which re-enables .train()); this

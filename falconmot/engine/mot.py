@@ -60,6 +60,7 @@ def _build_criterion(opt) -> FalconJDECriterion:
         losses              = losses,
         boxes_weight_format = None,
         use_uni_set         = True,
+        use_reid            = getattr(opt, 'use_reid', True),
         id_weight           = getattr(opt, 'id_weight', 1.0),
         use_triplet         = getattr(opt, 'tri', False),
         use_arcface         = not getattr(opt, 'no_arcface', False),
@@ -105,11 +106,14 @@ class MotTrainer(BaseTrainer):
     def _get_losses(self, opt):
         # loss_prox_reid đứng trước loss_det để không bị truncate ở progress bar
         loss_states = ['loss_det']
-        if getattr(opt, 'id_weight', 1.0) > 0:        # ReID off in train_single_det
+        if getattr(opt, 'use_reid', True) and getattr(opt, 'id_weight', 1.0) > 0:
             loss_states.append('loss_reid')
-        if getattr(opt, 'prox_reid', False) and getattr(opt, 'id_weight', 1.0) > 0:
+        if getattr(opt, 'prox_reid', False) and getattr(opt, 'use_reid', True) \
+                and getattr(opt, 'id_weight', 1.0) > 0:
             loss_states.append('loss_prox_reid')
-        loss_states += ['loss_cls', 'loss_bbox', 'loss_giou', 'loss_s4_aux']
+        loss_states += ['loss_cls', 'loss_bbox', 'loss_giou']
+        if getattr(opt, 'use_s4', False):
+            loss_states.append('loss_s4_aux')
         if getattr(opt, 'rep', False):
             loss_states.append('loss_rep')
         criterion = _build_criterion(opt)

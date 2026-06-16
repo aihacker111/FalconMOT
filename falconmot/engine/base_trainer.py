@@ -33,7 +33,9 @@ class BaseTrainer(object):
         else:
             self.model_with_loss = ModleWithLoss(model, self.loss)
 
-        self.optimizer.add_param_group({'params': self.loss.parameters()})
+        crit_params = [p for p in self.loss.parameters() if p.requires_grad]
+        if crit_params:
+            self.optimizer.add_param_group({'params': crit_params})
 
     def set_device(self, gpus, chunk_sizes, device):
         dev_ids = [i for i in range(len(gpus))]

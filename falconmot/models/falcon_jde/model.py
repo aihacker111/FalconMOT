@@ -13,7 +13,7 @@ from .hybrid_encoder import HybridEncoder
 from .decoder import DEIMTransformer
 from .dfine_decoder import MSDeformableAttention
 from .deim_utils import RMSNorm
-
+from .feat_fusion import FeatFusion, S4AuxiliaryHeadV2
 
 class ReIDHead(nn.Module):
     """Maps per-query hidden state → ReID embedding vector (baseline MLP)."""
@@ -165,6 +165,7 @@ class FalconJDEModel(nn.Module):
         reid_dim: int  = 128,
         use_s4:   bool = False,
         sta_dim:  int  = 0,
+        use_reid: bool = True,
         reid_head_type: str = 'transformer',
         reid_num_points: int = 8,
     ):
@@ -173,20 +174,24 @@ class FalconJDEModel(nn.Module):
         self.encoder   = encoder
         self.decoder   = decoder
         self.use_s4    = use_s4
+        self.use_reid  = use_reid
         self.reid_head_type = reid_head_type
 
-        if reid_head_type == 'transformer':
-            # Appearance-aware head: object query truy vấn ngược feature mịn quanh box
-            self.reid_head = TransformerReIDHead(
-                decoder.hidden_dim, reid_dim, num_points=reid_num_points)
-        else:
-            self.reid_head = ReIDHead(decoder.hidden_dim, reid_dim)
+        if use_reid:
+            if reid_head_type == 'transformer':
+                # Appearance-aware head: object query truy vấn ngược feature mịn quanh box
+                self.reid_head = TransformerReIDHead(
+                    decoder.hidden_dim, reid_dim, num_points=reid_num_points)
+            else:
+                self.reid_head = ReIDHead(decoder.hidden_dim, reid_dim)
 
         if use_s4:
             # Nhánh P2 nhẹ: c1 (stride-4) + S8 -> hidden_dim, dùng làm level đầu cho decoder
-            self.s4_branch   = S4LightBranch(sta_dim, decoder.hidden_dim)
+            # self.s4_branch   = S4LightBranch(sta_dim, decoder.hidden_dim)
+            self.s4_branch   = FeatFusion(sta_dim, decoder.hidden_dim, n_blocks=2)
+#                                           n_blocks=2)
             # Aux objectness trên P2 -> giữ gradient mạnh cho vật thể nhỏ
-            self.s4_aux_head = S4AuxiliaryHead(decoder.hidden_dim)
+            self.s4_aux_head = S4AuxiliaryHeadV2(decoder.hidden_dim)
 
     def forward(self, x: torch.Tensor, targets=None):
         feats = self.backbone(x)            # (S8, S16, S32)
@@ -206,13 +211,15 @@ class FalconJDEModel(nn.Module):
 
         if self.use_s4 and self.training:
             out['pred_s4_aux'] = self.s4_aux_head(p2)   # aux objectness trên P2
-        if 'eval_hs' in out:
+        if self.use_reid and 'eval_hs' in out:
             hs = out.pop('eval_hs')
             if self.reid_head_type == 'transformer':
                 # det_hs làm query, pred_boxes làm điểm tham chiếu lấy mẫu trên reid_feat
                 out['pred_reid'] = self.reid_head(hs, out['pred_boxes'], reid_feat)
             else:
                 out['pred_reid'] = self.reid_head(hs)
+        elif 'eval_hs' in out:
+            out.pop('eval_hs')
 
         return out
 
@@ -394,6 +401,7 @@ def build_falcon_jde(opt) -> FalconJDEModel:
     model = FalconJDEModel(
         backbone, encoder, decoder,
         reid_dim=reid_dim, use_s4=use_s4, sta_dim=sta_dim,
+        use_reid=getattr(opt, 'use_reid', True),
         reid_head_type=getattr(opt, 'reid_head_type', 'transformer'),
         reid_num_points=getattr(opt, 'reid_num_points', 8),
     )
