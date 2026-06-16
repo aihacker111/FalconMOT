@@ -11,10 +11,12 @@ import torch.nn.functional as F
 from .backbone import DINOv3STAs
 from .hybrid_encoder import HybridEncoder
 from .decoder import DEIMTransformer
+from .dfine_decoder import MSDeformableAttention
+from .deim_utils import RMSNorm
 
 
 class ReIDHead(nn.Module):
-    """Maps per-query hidden state → ReID embedding vector."""
+    """Maps per-query hidden state → ReID embedding vector (baseline MLP)."""
     def __init__(self, hidden_dim: int, reid_dim: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -23,8 +25,88 @@ class ReIDHead(nn.Module):
             nn.Linear(hidden_dim, reid_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         return self.net(x)
+
+
+def _largest_divisor(dim: int, candidates=(8, 6, 4, 3, 2, 1)) -> int:
+    """Pick the largest head-count in `candidates` that divides `dim`."""
+    for c in candidates:
+        if dim % c == 0:
+            return c
+    return 1
+
+
+class TransformerReIDHead(nn.Module):
+    """
+    Appearance-aware ReID head (deformable-sample fine feature quanh tâm box).
+
+    Khác với ReIDHead (MLP ăn thẳng det_hs — vốn đã bị tối ưu nặng cho box/class
+    nên mất chi tiết appearance), head này dùng mỗi object query làm "prompt" để
+    truy vấn ngược một feature map mịn (stride-4 P2 nếu bật use_s4, ngược lại là
+    feature stride-8 của encoder) thông qua deformable cross-attention lấy mẫu
+    quanh tâm box. Nhờ đó embedding lấy được texture/màu thay vì chỉ tín hiệu
+    định vị.
+
+    I/O:
+      - query        : det_hs              (B, N, hidden_dim)
+      - reference pts : pred_boxes (cxcywh) (B, N, 4), normalized [0,1] — detach
+      - value source  : fine feature map   (B, hidden_dim, H, W)
+      - output        : reid embedding      (B, N, reid_dim)
+
+    reid_dim mặc định 128 → tương thích ngược hoàn toàn với ArcFace/classifiers
+    trong criterion (không phải đụng tới gì ở đó).
+    """
+    def __init__(self, hidden_dim: int, reid_dim: int,
+                 num_heads: int = 8, num_points: int = 8):
+        super().__init__()
+        num_heads = _largest_divisor(hidden_dim) if hidden_dim % num_heads else num_heads
+        self.hidden_dim = hidden_dim
+        self.num_heads  = num_heads
+
+        # Chiếu feature map -> không gian value cho deformable attention
+        self.value_proj = nn.Linear(hidden_dim, hidden_dim)
+        # Sampler 1-level: object query lấy mẫu feature mịn quanh tâm/box-scale
+        self.deform_attn = MSDeformableAttention(
+            embed_dim=hidden_dim, num_heads=num_heads,
+            num_levels=1, num_points=num_points, method='default',
+        )
+        self.norm_q    = RMSNorm(hidden_dim)
+        self.norm_attn = RMSNorm(hidden_dim)
+
+        # Fusion: nội dung query (semantic/vị trí) ⊕ appearance lấy mẫu được
+        self.fuse = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim, reid_dim),
+        )
+
+    def _build_value(self, feat: torch.Tensor):
+        """[B,C,H,W] -> ([B, n_head, head_dim, H*W]), [[H,W]] cho core 'default'."""
+        B, C, H, W = feat.shape
+        v = feat.flatten(2).permute(0, 2, 1)          # [B, HW, C]
+        v = self.value_proj(v)                        # [B, HW, C]
+        head_dim = C // self.num_heads
+        v = v.reshape(B, H * W, self.num_heads, head_dim)
+        v = v.permute(0, 2, 3, 1).contiguous()        # [B, n_head, head_dim, HW]
+        return [v], [[H, W]]
+
+    def forward(self, det_hs: torch.Tensor,
+                pred_boxes: torch.Tensor,
+                feat: torch.Tensor) -> torch.Tensor:
+        # det_hs     : [B, N, C]
+        # pred_boxes : [B, N, 4]  cxcywh normalized (detach -> chỉ định vị trí lấy mẫu)
+        # feat       : [B, C, H, W]
+        value_list, spatial_shapes = self._build_value(feat)
+
+        q   = self.norm_q(det_hs)
+        ref = pred_boxes.detach().unsqueeze(2)        # [B, N, 1, 4] -> nhánh box-scaled
+
+        appearance = self.deform_attn(q, ref, value_list, spatial_shapes)  # [B, N, C]
+        appearance = self.norm_attn(appearance)
+
+        fused = torch.cat([det_hs, appearance], dim=-1)
+        return self.fuse(fused)
 
 
 class S4AuxiliaryHead(nn.Module):
@@ -83,13 +165,22 @@ class FalconJDEModel(nn.Module):
         reid_dim: int  = 128,
         use_s4:   bool = False,
         sta_dim:  int  = 0,
+        reid_head_type: str = 'transformer',
+        reid_num_points: int = 8,
     ):
         super().__init__()
         self.backbone  = backbone
         self.encoder   = encoder
         self.decoder   = decoder
-        self.reid_head = ReIDHead(decoder.hidden_dim, reid_dim)
         self.use_s4    = use_s4
+        self.reid_head_type = reid_head_type
+
+        if reid_head_type == 'transformer':
+            # Appearance-aware head: object query truy vấn ngược feature mịn quanh box
+            self.reid_head = TransformerReIDHead(
+                decoder.hidden_dim, reid_dim, num_points=reid_num_points)
+        else:
+            self.reid_head = ReIDHead(decoder.hidden_dim, reid_dim)
 
         if use_s4:
             # Nhánh P2 nhẹ: c1 (stride-4) + S8 -> hidden_dim, dùng làm level đầu cho decoder
@@ -106,16 +197,22 @@ class FalconJDEModel(nn.Module):
             c1 = getattr(self.backbone, '_s4_feat', None)
             p2 = self.s4_branch(c1, feats[0])
             dec_feats = [p2, feats[0], feats[1]]
+            reid_feat = p2                  # stride-4: mịn nhất cho appearance
         else:
             dec_feats = feats
+            reid_feat = feats[0]            # stride-8 encoder feature
 
         out = self.decoder(dec_feats, targets)
 
         if self.use_s4 and self.training:
             out['pred_s4_aux'] = self.s4_aux_head(p2)   # aux objectness trên P2
         if 'eval_hs' in out:
-            hs = out.pop('eval_hs')  
-            out['pred_reid'] = self.reid_head(hs)
+            hs = out.pop('eval_hs')
+            if self.reid_head_type == 'transformer':
+                # det_hs làm query, pred_boxes làm điểm tham chiếu lấy mẫu trên reid_feat
+                out['pred_reid'] = self.reid_head(hs, out['pred_boxes'], reid_feat)
+            else:
+                out['pred_reid'] = self.reid_head(hs)
 
         return out
 
@@ -297,6 +394,8 @@ def build_falcon_jde(opt) -> FalconJDEModel:
     model = FalconJDEModel(
         backbone, encoder, decoder,
         reid_dim=reid_dim, use_s4=use_s4, sta_dim=sta_dim,
+        reid_head_type=getattr(opt, 'reid_head_type', 'transformer'),
+        reid_num_points=getattr(opt, 'reid_num_points', 8),
     )
 
     ckpt_path = getattr(opt, 'deim_pretrained', '')

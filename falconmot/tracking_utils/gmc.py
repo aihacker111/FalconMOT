@@ -6,11 +6,22 @@ import time
 
 
 class GMC:
-    def __init__(self, method='sparseOptFlow', downscale=2, verbose=None):
+    def __init__(self, method='sparseOptFlow', downscale=2, verbose=None,
+                 seed=0, deterministic=True):
         super(GMC, self).__init__()
 
         self.method = method
         self.downscale = max(1, int(downscale))
+
+        # --- Determinism ---------------------------------------------------
+        # cv2.estimateAffinePartial2D(..., RANSAC) lấy mẫu ngẫu nhiên qua RNG
+        # toàn cục của OpenCV. Nếu không seed, kết quả nhảy giữa các lần chạy
+        # (đây là nguồn non-determinism run-to-run thật sự, KHÔNG phải optical
+        # flow). Seed cố định -> benchmark giá trị không đổi.
+        self.seed = int(seed)
+        self.deterministic = bool(deterministic)
+        if self.deterministic:
+            cv2.setRNGSeed(self.seed)
 
         if self.method == 'orb':
             self.detector = cv2.FastFeatureDetector_create(20)
@@ -67,6 +78,10 @@ class GMC:
         self.initializedFirstFrame = False
 
     def apply(self, raw_frame, detections=None):
+        # Re-seed cv2 RNG mỗi frame -> RANSAC ổn định, độc lập thứ tự gọi,
+        # benchmark không đổi giữa các lần chạy.
+        if self.deterministic:
+            cv2.setRNGSeed(self.seed)
         if self.method == 'orb' or self.method == 'sift':
             return self.applyFeaures(raw_frame, detections)
         elif self.method == 'ecc':

@@ -42,16 +42,31 @@ class FalconTracker:
         self.nfm_topk    = getattr(opt, 'nfm_topk', 2)              # NFM mutual-k
         self.use_nfm     = getattr(opt, 'use_nfm', True)
 
+        # GMC fusion-weight ramp (thay cho ngưỡng cứng norm<30 từng gây nhảy
+        # benchmark): nội suy mềm w_iou theo độ lớn dịch chuyển camera.
+        self.w_iou_hi    = getattr(opt, 'w_iou_hi', 0.5)   # GMC tin cậy (motion nhỏ)
+        self.w_iou_lo    = getattr(opt, 'w_iou_lo', 0.3)   # GMC kém tin (motion lớn)
+        self.gmc_band_lo = getattr(opt, 'gmc_band_lo', 20.0)
+        self.gmc_band_hi = getattr(opt, 'gmc_band_hi', 40.0)
+
         self.tracked = defaultdict(list)
         self.lost    = defaultdict(list)
         self.removed = defaultdict(list)
 
         self.frame_id = 0
         self.kalman_filter = KalmanFilter()
-        self.gmc = GMC(method='sparseOptFlow', verbose=[None, False])
+        self.gmc = self._make_gmc()
         self._curr_img = None
 
     # ------------------------------------------------------------------ api
+    def _make_gmc(self):
+        """Tạo GMC mới (re-seed RNG, prevFrame sạch). Dùng chung cho init & reset."""
+        return GMC(
+            method='sparseOptFlow', verbose=[None, False],
+            seed=getattr(self.opt, 'gmc_seed', 0),
+            deterministic=getattr(self.opt, 'gmc_deterministic', True),
+        )
+
     def set_image(self, img):
         self._curr_img = img
 
@@ -61,8 +76,29 @@ class FalconTracker:
         self.removed = defaultdict(list)
         self.frame_id = 0
         self.kalman_filter = KalmanFilter()
+        # Tạo lại GMC: tránh rò rỉ prevFrame giữa các sequence + re-seed RNG
+        self.gmc = self._make_gmc()
+        self._curr_img = None
 
     # ------------------------------------------------------------------ helpers
+    def _gmc_fusion_weight(self, gmc_H):
+        """Nội suy mềm w_iou theo độ lớn dịch chuyển camera (||translation||).
+
+        Thay cho ngưỡng cứng `0.5 if norm<30 else 0.3` — vốn lật nhánh chỉ vì
+        một dao động sub-pixel của gmc_H, khuếch đại variance benchmark. Ở đây
+        w_iou giảm tuyến tính từ w_iou_hi (motion nhỏ, GMC đáng tin) xuống
+        w_iou_lo (motion lớn) trong dải [gmc_band_lo, gmc_band_hi].
+        """
+        if gmc_H is None:
+            return self.w_iou_hi
+        trans = float(np.linalg.norm(gmc_H[:2, 2]))
+        lo, hi = self.gmc_band_lo, self.gmc_band_hi
+        if hi <= lo:
+            return self.w_iou_hi if trans < hi else self.w_iou_lo
+        t = (trans - lo) / (hi - lo)
+        t = min(1.0, max(0.0, t))                      # clip [0,1]
+        return self.w_iou_hi * (1.0 - t) + self.w_iou_lo * t
+
     def _reid_cost(self, tracks, dets, gated):
         cost = A.decay_gallery_distance(tracks, dets, self.frame_id, self.decay_alpha)
         if gated and self.use_nfm:
@@ -76,15 +112,14 @@ class FalconTracker:
             Track.reset_counts(self.num_classes)
 
         # global motion compensation (once per frame)
-        gmc_H, gmc_reliable = None, True
+        gmc_H = None
         if self._curr_img is not None:
             try:
                 r = self.gmc.apply(self._curr_img, None)
                 gmc_H = r[0] if isinstance(r, tuple) else r
-                gmc_reliable = float(np.linalg.norm(gmc_H[:2, 2])) < 30.0
             except Exception:
                 gmc_H = None
-        w_iou = 0.5 if gmc_reliable else 0.3
+        w_iou = self._gmc_fusion_weight(gmc_H)
 
         output = defaultdict(list)
 

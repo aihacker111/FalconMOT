@@ -79,6 +79,13 @@ class opts(object):
         # S4 branch (stride-4 for small/distant object detection)
         self.parser.add_argument('--use_s4', action='store_true', default=False,
                                  help='Add stride-4 branch: decoder uses [S4,S8,S16,S32].')
+        # ── ReID head ────────────────────────────────────────────────────
+        self.parser.add_argument('--reid_head_type', default='transformer',
+                                 choices=['transformer', 'mlp'],
+                                 help="ReID head: 'transformer' (deformable-sample feature "
+                                      "mịn quanh box, appearance-aware) hoặc 'mlp' (baseline).")
+        self.parser.add_argument('--reid_num_points', type=int, default=8,
+                                 help='số điểm deformable-sample/box cho TransformerReIDHead')
 
         # Pretrained / spatial size
         self.parser.add_argument('--deim_pretrained', default='',
@@ -230,6 +237,21 @@ class opts(object):
         self.parser.add_argument('--use_nfm', action='store_true', default=True,
                                  help='enable mutual top-k NFM gating (reduces ID switches)')
         self.parser.add_argument('--no_nfm', dest='use_nfm', action='store_false')
+        # ── GMC determinism + w_iou ramp (benchmark ổn định) ─────────────
+        self.parser.add_argument('--gmc_seed', type=int, default=0,
+                                 help='seed RNG của OpenCV cho RANSAC trong GMC -> benchmark không đổi')
+        self.parser.add_argument('--gmc_deterministic', action='store_true', default=True,
+                                 help='re-seed cv2 RNG mỗi frame để RANSAC tất định')
+        self.parser.add_argument('--no_gmc_deterministic', dest='gmc_deterministic',
+                                 action='store_false')
+        self.parser.add_argument('--w_iou_hi', type=float, default=0.5,
+                                 help='trọng số IoU khi GMC tin cậy (camera motion nhỏ)')
+        self.parser.add_argument('--w_iou_lo', type=float, default=0.3,
+                                 help='trọng số IoU khi GMC kém tin (camera motion lớn)')
+        self.parser.add_argument('--gmc_band_lo', type=float, default=20.0,
+                                 help='||translation|| bắt đầu giảm w_iou (ramp dưới)')
+        self.parser.add_argument('--gmc_band_hi', type=float, default=40.0,
+                                 help='||translation|| đạt w_iou_lo (ramp trên)')
         self.parser.add_argument('--min-box-area', type=float, default=100,
                                  help='filter boxes smaller than this area (px²)')
         self.parser.add_argument('--test_visdrone', default=True)
