@@ -211,15 +211,13 @@ class FalconJDEModel(nn.Module):
 
         if self.use_s4 and self.training:
             out['pred_s4_aux'] = self.s4_aux_head(p2)   # aux objectness trên P2
-        if self.use_reid and 'eval_hs' in out:
+        if 'eval_hs' in out:
             hs = out.pop('eval_hs')
             if self.reid_head_type == 'transformer':
                 # det_hs làm query, pred_boxes làm điểm tham chiếu lấy mẫu trên reid_feat
                 out['pred_reid'] = self.reid_head(hs, out['pred_boxes'], reid_feat)
             else:
                 out['pred_reid'] = self.reid_head(hs)
-        elif 'eval_hs' in out:
-            out.pop('eval_hs')
 
         return out
 
@@ -368,7 +366,7 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         feat_channels = [hidden_dim] * 3
         feat_strides  = [4, 8, 16]
         num_levels    = 3
-        num_points    = [3, 3, 6]
+        num_points    = [6, 4, 4]
     else:
         feat_channels = [hidden_dim] * 3
         feat_strides  = [8, 16, 32]
@@ -401,7 +399,6 @@ def build_falcon_jde(opt) -> FalconJDEModel:
     model = FalconJDEModel(
         backbone, encoder, decoder,
         reid_dim=reid_dim, use_s4=use_s4, sta_dim=sta_dim,
-        use_reid=getattr(opt, 'use_reid', True),
         reid_head_type=getattr(opt, 'reid_head_type', 'transformer'),
         reid_num_points=getattr(opt, 'reid_num_points', 8),
     )
