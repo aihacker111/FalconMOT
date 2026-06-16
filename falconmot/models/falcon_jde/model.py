@@ -368,7 +368,7 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         feat_channels = [hidden_dim] * 3
         feat_strides  = [4, 8, 16]
         num_levels    = 3
-        num_points    = [6, 4, 3]
+        num_points    = [3, 3, 6]
     else:
         feat_channels = [hidden_dim] * 3
         feat_strides  = [8, 16, 32]
