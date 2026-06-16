@@ -94,7 +94,7 @@ def apply_phase0(model):
     _report(model)
 
 
-def apply_phase1(model, keep_backbone_frozen: bool = True, freeze_norm: bool = True):
+def apply_phase1(model, keep_backbone_frozen: bool = False, freeze_norm: bool = False):
     """Unfreeze encoder + decoder (+ S4). Optionally keep backbone frozen.
     If freeze_norm, BatchNorm running-stats in encoder/S4 stay locked (eval) to
     avoid eval-time drift under heavy augmentation, while their weights train."""

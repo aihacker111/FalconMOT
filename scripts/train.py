@@ -1486,8 +1486,10 @@ def run(opt):
     in_phase1 = start_epoch >= warmup_ep
     if in_phase1:
         stage_mgr.apply_phase1(model,
-                               keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', True),
-                               freeze_norm=getattr(opt, 'freeze_norm_stats', True))
+                            #    keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', False),
+                            #    freeze_norm=getattr(opt, 'freeze_norm_stats', False))
+                              keep_backbone_frozen=False,
+                              freeze_norm=False)
         init_lr = opt.lr
     else:
         stage_mgr.apply_phase0(model)
