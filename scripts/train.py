@@ -1379,10 +1379,51 @@ def run(opt):
     opt.device = torch.device('cuda' if opt.gpus[0] >= 0 else 'cpu')
 
     # ── Val dataset (optional) ──────────────────────────────────────────
+    # val_loader   = None
+    # val_ann_file = ''   # used by CocoJsonEvaluator when use_coco_fmt
+
+    # if getattr(opt, 'val_cfg', ''):
+    #     with open(opt.val_cfg) as f:
+    #         val_config = json.load(f)
+    #     val_dataset = None
+
+    #     if use_coco_fmt:
+    #         val_ann_file = val_config.get('val_ann', '')
+    #         val_img      = val_config.get('val_img', '')
+    #         if val_ann_file and val_img:
+    #             val_dataset = VisDroneCocoDataset(
+    #                 opt=opt, img_root=val_img, ann_file=val_ann_file, augment=False)
+    #         else:
+    #             print('[warn] val_cfg missing val_ann/val_img keys for COCO format.')
+    #     else:
+    #         val_root  = val_config.get('root', dataset_root)
+    #         val_paths = val_config.get('val') or val_config.get('test') or []
+    #         if val_paths:
+    #             val_dataset = Dataset(
+    #                 opt=opt, root=val_root, paths=val_paths,
+    #                 img_size=opt.input_wh, augment=False,
+    #                 transforms=T.Compose([T.ToTensor()]))
+    #         else:
+    #             print('[warn] val_cfg provided but no val/test paths found.')
+
+    #     if val_dataset is not None:
+    #         val_loader = torch.utils.data.DataLoader(
+    #             dataset=val_dataset,
+    #             batch_size=opt.batch_size,
+    #             shuffle=False,
+    #             num_workers=opt.num_workers,
+    #             pin_memory=True,
+    #             drop_last=False,
+    #             persistent_workers=opt.num_workers > 0,
+    #             prefetch_factor=2 if opt.num_workers > 0 else None,
+    #         )
+    #         print(f'Val dataset: {len(val_dataset)} images')
     val_loader   = None
     val_ann_file = ''   # used by CocoJsonEvaluator when use_coco_fmt
 
-    if getattr(opt, 'val_cfg', ''):
+    if getattr(opt, 'merge_val_into_train', False):
+        print('[data] merge_val_into_train=True -> bỏ qua val_loader, không chạy COCO eval.')
+    elif getattr(opt, 'val_cfg', ''):
         with open(opt.val_cfg) as f:
             val_config = json.load(f)
         val_dataset = None
