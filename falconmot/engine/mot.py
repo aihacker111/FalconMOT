@@ -37,7 +37,7 @@ def _build_criterion(opt) -> FalconJDECriterion:
         'loss_cls':  2.0,
         'loss_bbox': 5.0,
         'loss_giou': 2.0,
-        'loss_s4_aux': 0.5
+        'loss_s4_aux': 1.0
     }
     if use_rep:
         weight_dict['loss_rep'] = rep_weight
