@@ -63,7 +63,7 @@ class ConvNeXtV2Block(nn.Module):
     """DW(7x7) -> LN -> PW-expand -> GELU -> GRN -> PW-project, residual.
     Receptive field lớn (7x7 depthwise) + GRN, rất ít param so với conv thường.
     """
-    def __init__(self, dim: int, expand: float = 2.0, k: int = 7):
+    def __init__(self, dim: int, expand: float = 2.0, k: int = 3):
         super().__init__()
         self.dw   = nn.Conv2d(dim, dim, k, padding=k // 2, groups=dim, bias=True)
         self.norm = LayerNorm2d(dim)
@@ -84,44 +84,99 @@ class ConvNeXtV2Block(nn.Module):
         return r + x
 
 
+# class FeatFusion(nn.Module):
+#     """Nhánh stride-4 mạnh-nhẹ thay cho S4LightBranch.
+
+#     c1 (stride-4, chi tiết) + S8 (ngữ nghĩa) -> gated fusion ở dim trung gian
+#     -> n_blocks ConvNeXtV2 (DW7x7+GRN) -> project lên hidden_dim cho decoder.
+
+#     Chạy refine ở `mid` (mặc định hidden_dim//2) để rẻ ở độ phân giải cao,
+#     chỉ bung lên hidden_dim ở bước cuối.
+#     """
+#     def __init__(self, c1_ch: int, hidden_dim: int,
+#                  mid_dim: int = None, n_blocks: int = 2, expand: float = 2.0):
+#         super().__init__()
+#         mid = mid_dim or hidden_dim // 2
+
+#         self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)        # chi tiết từ c1
+#         self.sem    = nn.Conv2d(hidden_dim, mid, 1, bias=False)   # ngữ nghĩa từ S8
+
+#         # Gate per-pixel: học cách trộn chi tiết vs ngữ nghĩa theo từng vị trí
+#         self.gate = nn.Sequential(
+#             nn.Conv2d(mid * 2, mid, 1, bias=True),
+#             nn.SiLU(inplace=True),
+#             nn.Conv2d(mid, mid, 1, bias=True),
+#             nn.Sigmoid(),
+#         )
+
+#         self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand) for _ in range(n_blocks)])
+
+#         self.out    = nn.Conv2d(mid, hidden_dim, 1, bias=False)
+#         # self.out_bn = nn.BatchNorm2d(hidden_dim)
+#         self.out_bn = LayerNorm2d(hidden_dim)
+
+#     def forward(self, c1: torch.Tensor, s8: torch.Tensor) -> torch.Tensor:
+#         d = self.detail(c1)                                       # [B,mid,H4,W4]
+#         s = self.sem(s8)
+#         s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False)
+#         g = self.gate(torch.cat([d, s], dim=1))                  # [B,mid,H4,W4] in (0,1)
+#         x = g * d + (1.0 - g) * s                                 # gated fusion
+#         x = self.blocks(x)
+#         return self.out_bn(self.out(x))
+
+
+
 class FeatFusion(nn.Module):
-    """Nhánh stride-4 mạnh-nhẹ thay cho S4LightBranch.
-
-    c1 (stride-4, chi tiết) + S8 (ngữ nghĩa) -> gated fusion ở dim trung gian
-    -> n_blocks ConvNeXtV2 (DW7x7+GRN) -> project lên hidden_dim cho decoder.
-
-    Chạy refine ở `mid` (mặc định hidden_dim//2) để rẻ ở độ phân giải cao,
-    chỉ bung lên hidden_dim ở bước cuối.
+    """Nhánh kết hợp đặc trưng Stride-4 siêu nhẹ (Đã tối ưu FLOPs & VRAM).
+    
+    Thay vì Concat + Conv 1x1 nặng nề, phiên bản này dùng ngữ nghĩa tầng sâu (S8) 
+    qua một bộ lọc Depthwise Spatial Gate để dập nhiễu nền trên tầng chi tiết (C1), 
+    sau đó thực hiện phép cộng (Element-wise Addition).
     """
     def __init__(self, c1_ch: int, hidden_dim: int,
                  mid_dim: int = None, n_blocks: int = 2, expand: float = 2.0):
         super().__init__()
         mid = mid_dim or hidden_dim // 2
 
-        self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)        # chi tiết từ c1
-        self.sem    = nn.Conv2d(hidden_dim, mid, 1, bias=False)   # ngữ nghĩa từ S8
+        # Lớp giảm kênh (Projection) giữ nguyên
+        self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)        # Chi tiết từ c1
+        self.sem    = nn.Conv2d(hidden_dim, mid, 1, bias=False)   # Ngữ nghĩa từ S8
 
-        # Gate per-pixel: học cách trộn chi tiết vs ngữ nghĩa theo từng vị trí
-        self.gate = nn.Sequential(
-            nn.Conv2d(mid * 2, mid, 1, bias=True),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(mid, mid, 1, bias=True),
-            nn.Sigmoid(),
+        # CẢI TIẾN 1: Thay thế Gate Concat bằng Depthwise Spatial Gate
+        # Chỉ tốn mid * 3 * 3 tham số (cực kỳ ít) thay vì (mid * 2) * mid của Conv 1x1 cũ
+        self.gate_spatial = nn.Sequential(
+            nn.Conv2d(mid, mid, 3, padding=1, groups=mid, bias=True),
+            nn.Sigmoid()
         )
 
+        # Giữ nguyên các block xử lý cốt lõi
         self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand) for _ in range(n_blocks)])
 
         self.out    = nn.Conv2d(mid, hidden_dim, 1, bias=False)
-        self.out_bn = nn.BatchNorm2d(hidden_dim)
+        
+        # CẢI TIẾN 2: Đồng nhất sang LayerNorm2d thay vì BatchNorm2d
+        # Giúp ổn định luồng gradient khi train với Batch Size nhỏ (2, 4, 8)
+        self.out_norm = LayerNorm2d(hidden_dim)
 
     def forward(self, c1: torch.Tensor, s8: torch.Tensor) -> torch.Tensor:
-        d = self.detail(c1)                                       # [B,mid,H4,W4]
-        s = self.sem(s8)
-        s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False)
-        g = self.gate(torch.cat([d, s], dim=1))                  # [B,mid,H4,W4] in (0,1)
-        x = g * d + (1.0 - g) * s                                 # gated fusion
+        # 1. Trích xuất đặc trưng hình học và ngữ nghĩa về cùng số kênh `mid`
+        d = self.detail(c1)                                       # [B, mid, H4, W4]
+        s = self.sem(s8)                                          # [B, mid, H8, W8]
+        
+        # 2. Nội suy S8 lên cùng độ phân giải với C1
+        s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False) # [B, mid, H4, W4]
+        
+        # 3. CẢI TIẾN LƯU THÔNG: Sinh màng lọc từ Semantic (S8)
+        # S8 mang thông tin vị trí vật thể tốt, dùng nó để tạo "mặt nạ che nhiễu"
+        g = self.gate_spatial(s)                                  # [B, mid, H4, W4] trong khoảng (0, 1)
+        
+        # 4. Gated Fusion dạng Nhân-Cộng (Element-wise Multiplication & Addition)
+        # Loại bỏ hoàn toàn bước torch.cat -> Tiết kiệm bộ nhớ đệm VRAM tối đa
+        x = (d * g) + s                                           
+        
+        # 5. Đi qua các block tinh lọc đặc trưng và bung kênh đầu ra
         x = self.blocks(x)
-        return self.out_bn(self.out(x))
+        return self.out_norm(self.out(x))
 
 
 class S4AuxiliaryHeadV2(nn.Module):
