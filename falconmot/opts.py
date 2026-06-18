@@ -476,7 +476,7 @@ class opts(object):
         self.parser.add_argument('--reid_warmup_lr', type=float, default=-1.0,
                                 help='LR cho Phase 0 (-1 = dùng --lr). Có thể đặt cao hơn '
                                     'vì chỉ train vài head nhỏ, vd 1e-3.')
-        self.parser.add_argument('--keep_backbone_frozen', action='store_true', default=True,
+        self.parser.add_argument('--keep_backbone_frozen', action='store_true', default=False,
                                 help='Phase 1: giữ backbone freeze (khuyến nghị).')
         self.parser.add_argument('--unfreeze_backbone', dest='keep_backbone_frozen',
                                 action='store_false')
