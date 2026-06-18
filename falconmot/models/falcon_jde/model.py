@@ -77,9 +77,7 @@ class TransformerReIDHead(nn.Module):
         v = v.permute(0, 2, 3, 1).contiguous()        
         return [v], [[H, W]]
 
-    def forward(self, det_hs: torch.Tensor,
-                pred_boxes: torch.Tensor,
-                feat: torch.Tensor) -> torch.Tensor:
+    def forward(self, det_hs, pred_boxes, feat, **kwargs) -> torch.Tensor:
         # det_hs: [B, N, C] - Đã được detach() từ Forward
         # pred_boxes: [B, N, 4] - Đã được detach() từ Forward
         # feat: [B, C, H, W] - KHÔNG detach để Encoder học ReID
@@ -96,47 +94,6 @@ class TransformerReIDHead(nn.Module):
         emb = self.fuse(fused)
         
         return self.bottleneck(emb) # Trả về vector đã chuẩn hóa
-
-
-# --- Cập nhật forward của FalconJDEModel ---
-
-    def forward(self, x: torch.Tensor, targets=None):
-        feats = self.backbone(x)            
-        feats = self.encoder(feats)         
-
-        if self.use_s4:
-            c1 = getattr(self.backbone, '_s4_feat', None)
-            p2 = self.s4_branch(c1, feats[0])
-            dec_feats = [p2, feats[0], feats[1]]
-            reid_feat = p2                  
-        else:
-            dec_feats = feats
-            reid_feat = feats[0]            
-
-        out = self.decoder(dec_feats, targets)
-
-        if self.use_s4 and self.use_s4_aux and self.training:
-            out['pred_s4_aux'] = self.s4_aux_head(p2)   
-
-        if 'eval_hs' in out:
-            hs = out.pop('eval_hs')
-            pred_boxes = out['pred_boxes']
-            
-            # CƠ CHẾ BẢO VỆ: Detach hoàn toàn Queries và Box. 
-            # Nhánh ReID Loss sẽ KHÔNG THỂ phá hủy khả năng Detection của Decoder.
-            hs_det = hs.detach()
-            boxes_det = pred_boxes.detach()
-            
-            # NHƯNG: reid_feat (P2/S4 feature) KHÔNG detach. 
-            # Loss ReID sẽ giúp Encoder/Backbone tinh chỉnh Feature map nhạy hơn với màu sắc/ID.
-            
-            if self.reid_head_type == 'transformer':
-                out['pred_reid'] = self.reid_head(hs_det, boxes_det, reid_feat)
-            else:
-                # Nếu dùng Linear/Context, hãy đảm bảo vẫn đưa reid_feat vào nếu có thể
-                out['pred_reid'] = self.reid_head(hs_det)
-
-        return out
 
 
 class ContextAwareReIDHead(nn.Module):
@@ -248,7 +205,7 @@ class FalconJDEModel(nn.Module):
         if use_reid:
             if reid_head_type == 'transformer':
                 self.reid_head = TransformerReIDHead(
-                    decoder.hidden_dim, reid_dim, num_points=reid_num_points)
+                    decoder.hidden_dim, reid_dim, num_heads=8, num_points=reid_num_points)
             elif reid_head_type == 'context_aware':
                 self.reid_head = ContextAwareReIDHead(
                     decoder.hidden_dim, reid_dim)
