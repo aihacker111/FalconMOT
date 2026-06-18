@@ -186,19 +186,6 @@
 #         self.parser.add_argument('--rep_weight', type=float, default=0.5)
 #         self.parser.add_argument('--no_arcface', action='store_true', default=False,
 #                                  help='use plain CE+Triplet instead of ArcFace for ReID')
-#         self.parser.add_argument('--prox_reid', action='store_true', default=False,
-#                                  help='add Spatial-Proximity ReID loss (reduces ID collision)')
-#         self.parser.add_argument('--prox_dist_thresh', type=float, default=0.10,
-#                                  help='normalized center-distance threshold for proximity pairs')
-#         self.parser.add_argument('--prox_base_margin', type=float, default=0.80,
-#                                  help='base margin for proximity loss — must be > TripletLoss margin; '
-#                                       '128-dim normalized random vectors have dist≈1.414, '
-#                                       'set >1.0 to keep loss active early in training')
-#         self.parser.add_argument('--prox_margin_scale', type=float, default=0.50,
-#                                  help='extra margin when two objects fully overlap (dist=0); '
-#                                       'max_margin = base + scale')
-#         self.parser.add_argument('--prox_weight', type=float, default=0.50,
-#                                  help='loss weight for loss_prox_reid')
 
 #         # ── Sequence-aware augmentation ────────────────────────────────────
 #         self.parser.add_argument('--temporal_mosaic', action='store_true', default=False,
@@ -305,7 +292,6 @@
 #             opt.use_reid           = False
 #             opt.id_weight          = 0.0
 #             opt.temporal_mosaic    = False
-#             opt.prox_reid          = False
 #             opt.reid_warmup_epochs = 0
 #             opt.id_warmup_epochs   = 0
 #             s4_tag = '+s4_aux' if (getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True)) else ''
@@ -472,7 +458,7 @@ class opts(object):
                                       'va chạm. Lưu ý: không còn val tách biệt để đánh giá.')
         # ── ReID head ────────────────────────────────────────────────────
         self.parser.add_argument('--reid_head_type', default='transformer',
-                                 choices=['transformer', 'mlp'],
+                                 choices=['transformer', 'context_aware', 'mlp'],
                                  help="ReID head: 'transformer' (deformable-sample feature "
                                       "mịn quanh box, appearance-aware) hoặc 'mlp' (baseline).")
         self.parser.add_argument('--reid_num_points', type=int, default=8,
@@ -567,19 +553,6 @@ class opts(object):
         self.parser.add_argument('--rep_weight', type=float, default=0.5)
         self.parser.add_argument('--no_arcface', action='store_true', default=False,
                                  help='use plain CE+Triplet instead of ArcFace for ReID')
-        self.parser.add_argument('--prox_reid', action='store_true', default=False,
-                                 help='add Spatial-Proximity ReID loss (reduces ID collision)')
-        self.parser.add_argument('--prox_dist_thresh', type=float, default=0.10,
-                                 help='normalized center-distance threshold for proximity pairs')
-        self.parser.add_argument('--prox_base_margin', type=float, default=0.80,
-                                 help='base margin for proximity loss — must be > TripletLoss margin; '
-                                      '128-dim normalized random vectors have dist≈1.414, '
-                                      'set >1.0 to keep loss active early in training')
-        self.parser.add_argument('--prox_margin_scale', type=float, default=0.50,
-                                 help='extra margin when two objects fully overlap (dist=0); '
-                                      'max_margin = base + scale')
-        self.parser.add_argument('--prox_weight', type=float, default=0.50,
-                                 help='loss weight for loss_prox_reid')
 
         # ── Sequence-aware augmentation ────────────────────────────────────
         self.parser.add_argument('--temporal_mosaic', action='store_true', default=False,
@@ -693,7 +666,6 @@ class opts(object):
             opt.use_reid           = False
             opt.id_weight          = 0.0
             opt.temporal_mosaic    = False
-            opt.prox_reid          = False
             opt.reid_warmup_epochs = 0
             opt.id_warmup_epochs   = 0
             s4_tag = '+s4_aux' if (getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True)) else ''

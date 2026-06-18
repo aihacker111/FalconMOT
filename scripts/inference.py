@@ -15,15 +15,24 @@ from falconmot.opts import opts
 _IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 
 # Định nghĩa danh sách nhãn chuẩn của VisDrone
+# VISDRONE_CLASSES = [
+#     "pedestrian",
+#     "people",
+#     "bicycle",
+#     "car",
+#     "van",
+#     "truck",
+#     "tricycle",
+#     "awning-tricycle",
+#     "bus",
+#     "motor",
+# ]
 VISDRONE_CLASSES = [
     "pedestrian",
-    "people",
     "bicycle",
     "car",
-    "van",
     "truck",
     "tricycle",
-    "awning-tricycle",
     "bus",
     "motor",
 ]

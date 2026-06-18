@@ -6,7 +6,6 @@ Losses used:
     loss_bbox      — L1 box regression
     loss_giou      — GIoU box regression
     loss_reid      — CE per-class ReID (optional: + triplet)
-    loss_prox_reid — Spatial-Proximity ReID (optional: --prox_reid)
 """
 
 from __future__ import absolute_import, division, print_function
@@ -28,8 +27,6 @@ def _build_criterion(opt) -> FalconJDECriterion:
 
     use_rep      = getattr(opt, 'rep', False)
     rep_weight   = getattr(opt, 'rep_weight', 0.5)
-    use_prox     = getattr(opt, 'prox_reid', False)
-    prox_weight  = getattr(opt, 'prox_weight', 0.5)
     use_s4       = getattr(opt, 'use_s4', False)
     use_s4_aux   = use_s4 and getattr(opt, 'use_s4_aux', True)
 
@@ -43,8 +40,6 @@ def _build_criterion(opt) -> FalconJDECriterion:
         weight_dict['loss_s4_aux'] = 0.2
     if use_rep:
         weight_dict['loss_rep'] = rep_weight
-    if use_prox:
-        weight_dict['loss_prox_reid'] = prox_weight
 
     base_losses = ['focal', 'boxes']
     if use_rep:
@@ -66,10 +61,6 @@ def _build_criterion(opt) -> FalconJDECriterion:
         id_weight           = getattr(opt, 'id_weight', 1.0),
         use_triplet         = getattr(opt, 'tri', False),
         use_arcface         = not getattr(opt, 'no_arcface', False),
-        use_prox_reid       = use_prox,
-        prox_dist_thresh    = getattr(opt, 'prox_dist_thresh', 0.10),
-        prox_base_margin    = getattr(opt, 'prox_base_margin', 0.30),
-        prox_margin_scale   = getattr(opt, 'prox_margin_scale', 0.40),
     )
 
 
@@ -106,13 +97,9 @@ class MotTrainer(BaseTrainer):
         super().__init__(opt, model, optimizer=optimizer, **kwargs)
 
     def _get_losses(self, opt):
-        # loss_prox_reid đứng trước loss_det để không bị truncate ở progress bar
         loss_states = ['loss_det']
         if getattr(opt, 'use_reid', True) and getattr(opt, 'id_weight', 1.0) > 0:
             loss_states.append('loss_reid')
-        if getattr(opt, 'prox_reid', False) and getattr(opt, 'use_reid', True) \
-                and getattr(opt, 'id_weight', 1.0) > 0:
-            loss_states.append('loss_prox_reid')
         loss_states += ['loss_cls', 'loss_bbox', 'loss_giou']
         if getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True):
             loss_states.append('loss_s4_aux')

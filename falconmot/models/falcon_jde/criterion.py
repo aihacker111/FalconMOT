@@ -115,11 +115,6 @@ class FalconJDECriterion(nn.Module):
         id_weight:           float = 1.0,
         use_triplet:         bool  = False,
         use_arcface:         bool  = True,
-        # Spatial-Proximity ReID loss
-        use_prox_reid:       bool  = False,
-        prox_dist_thresh:    float = 0.10,
-        prox_base_margin:    float = 0.30,
-        prox_margin_scale:   float = 0.40,
     ):
         super().__init__()
         self.matcher             = matcher
@@ -136,11 +131,6 @@ class FalconJDECriterion(nn.Module):
         self.id_weight           = id_weight
         self.use_triplet         = use_triplet
         self.use_arcface         = use_arcface
-        self.use_prox_reid       = use_prox_reid
-        self.prox_dist_thresh    = prox_dist_thresh
-        self.prox_base_margin    = prox_base_margin
-        self.prox_margin_scale   = prox_margin_scale
-
 
         self.weight_dict = weight_dict or {
             'loss_cls':  2.0,
@@ -346,67 +336,6 @@ class FalconJDECriterion(nn.Module):
     # Mask loss (AMOT DiceLoss adaptation for DETR query-based paradigm)
     # ------------------------------------------------------------------
 
-    def loss_prox_reid(self, outputs, targets, indices) -> dict:
-        """Spatial-Proximity ReID loss (analog của CenterNet offset loss cho ID collision).
-
-        Vấn đề: TripletLoss dùng margin cố định cho tất cả negative pairs,
-        kể cả hai object cách nhau rất xa — không cần push mạnh.
-        Hai object gần nhau mới là nguồn gốc ID collision, cần margin lớn hơn.
-
-        Với mỗi image: tìm cặp (i, j) khác track_id có center distance < prox_dist_thresh,
-        apply: loss = ReLU(margin(dist_ij) - ||emb_i - emb_j||)
-        trong đó margin tỉ lệ nghịch với khoảng cách: gần hơn → margin lớn hơn.
-        """
-        if 'pred_reid' not in outputs:
-            return {}
-
-        pred_reid = outputs['pred_reid']   # (B, N_queries, D)
-        dev       = pred_reid.device
-        total     = pred_reid.sum() * 0.0
-        n_pairs   = 0
-
-        for b_idx, (src_idx, tgt_idx) in enumerate(indices):
-            if len(src_idx) < 2:
-                continue
-
-            t        = targets[b_idx]
-            tids     = t['track_ids'].to(dev)[tgt_idx.to(dev)]   # (N,)
-            gt_boxes = t['boxes'].to(dev)[tgt_idx.to(dev)]       # (N, 4) cxcywh norm
-            valid    = tids >= 0
-            if valid.sum() < 2:
-                continue
-
-            embs  = F.normalize(pred_reid[b_idx][src_idx.to(dev)[valid]], dim=-1)
-            tids  = tids[valid]
-            boxes = gt_boxes[valid]  # (M, 4)
-
-            # Center distance matrix (normalized coords, range [0, sqrt(2)])
-            cx = boxes[:, 0]
-            cy = boxes[:, 1]
-            dist_mat = ((cx.unsqueeze(0) - cx.unsqueeze(1)) ** 2
-                      + (cy.unsqueeze(0) - cy.unsqueeze(1)) ** 2).sqrt()  # (M, M)
-
-            # Hard-negative proximity mask: khác ID + đủ gần + upper-triangle (no dup)
-            diff_id  = tids.unsqueeze(0) != tids.unsqueeze(1)
-            proximal = dist_mat < self.prox_dist_thresh
-            upper    = torch.triu(torch.ones_like(diff_id, dtype=torch.bool), diagonal=1)
-            mask     = diff_id & proximal & upper
-
-            if not mask.any():
-                continue
-
-            ii, jj   = mask.nonzero(as_tuple=True)
-            emb_dist = (embs[ii] - embs[jj]).norm(dim=-1)          # (P,)
-
-            # Adaptive margin: proximity_score=1 khi hoàn toàn chồng lên nhau, =0 tại ngưỡng
-            proximity_score = 1.0 - dist_mat[ii, jj] / self.prox_dist_thresh
-            margin = self.prox_base_margin + self.prox_margin_scale * proximity_score
-
-            total   = total + F.relu(margin - emb_dist).mean()
-            n_pairs += 1
-
-        return {'loss_prox_reid': total / max(n_pairs, 1)}
-
     # ------------------------------------------------------------------
     # Matching utilities
     # ------------------------------------------------------------------
@@ -577,12 +506,6 @@ class FalconJDECriterion(nn.Module):
         if self.use_reid and self.id_weight > 0:
             reid_dict = self.loss_reid(outputs, targets, indices)
             losses.update({k: v * self.id_weight for k, v in reid_dict.items()})
-
-            # Spatial-Proximity ReID loss
-            if self.use_prox_reid:
-                prox_dict = self.loss_prox_reid(outputs, targets, indices)
-                w = self.weight_dict.get('loss_prox_reid', 0.5)
-                losses.update({k: v * w for k, v in prox_dict.items()})
 
         losses = {k: torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
 
