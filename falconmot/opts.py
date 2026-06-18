@@ -581,6 +581,17 @@ class opts(object):
         self.parser.add_argument('--reid_dim', type=int, default=128)
         self.parser.add_argument('--reid_cls_ids', default='0,1,2,3,4,5,6,7,8,9')
 
+        # ── Tracking nguồn COCO (đồng bộ với training/val) ──
+        self.parser.add_argument('--track_from_coco', action='store_true', default=False,
+                                help='lấy ảnh + danh sách seq/frame từ COCO JSON thay vì '
+                                    'test_dev/sequences thô (đồng bộ tiền xử lý với training)')
+        self.parser.add_argument('--track_ann_file', type=str, default='',
+                                help='COCO JSON annotation cho tracking; rỗng → dùng val_ann trong data_cfg')
+        self.parser.add_argument('--track_img_root', type=str, default='',
+                                help='thư mục ảnh tương ứng track_ann_file; rỗng → dùng val_img trong data_cfg')
+        self.parser.add_argument('--track_gt_root', type=str, default='',
+                                help='thư mục annotation VisDrone thô của split tracking '
+                                    '(vd .../VisDrone2019-MOT-val/annotations) để Evaluator dựng GT')
         # ── Tracking inference ─────────────────────────────────────────────
         self.parser.add_argument('--eval_mode', type=str, default='10class',
                                  choices=['10class', '5class', '4class',
