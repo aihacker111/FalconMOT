@@ -35,19 +35,23 @@ def _is_dist():
 
 
 class ArcFace(nn.Module):
-    """ArcFace margin loss head for ReID."""
-
-    def __init__(self, in_features: int, num_ids: int, s: float = 30.0, m: float = 0.35):
+    """
+    ArcFace Margin Loss được tinh chỉnh cho Tracking Drone.
+    Hạ s (scale) và m (margin) giúp model dễ hội tụ hơn khi vật thể nhỏ và nhòe.
+    """
+    def __init__(self, in_features: int, num_ids: int, s: float = 16.0, m: float = 0.15):
         super().__init__()
         self.s = s
         self.weight = nn.Parameter(torch.FloatTensor(num_ids, in_features))
         nn.init.xavier_uniform_(self.weight)
+        
         self.cos_m = math.cos(m)
         self.sin_m = math.sin(m)
         self.th    = math.cos(math.pi - m)
         self.mm    = math.sin(math.pi - m) * m
 
     def forward(self, x: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
+        # X đã được qua LayerNorm Bottleneck nên normalize ở đây sẽ rất ổn định
         cosine = F.linear(F.normalize(x), F.normalize(self.weight))
         sine   = torch.sqrt((1.0 - cosine.pow(2)).clamp(0, 1))
         phi    = cosine * self.cos_m - sine * self.sin_m

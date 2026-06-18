@@ -41,7 +41,7 @@ def _largest_divisor(dim: int, candidates=(8, 6, 4, 3, 2, 1)) -> int:
 
 class TransformerReIDHead(nn.Module):
     """
-    Appearance-aware ReID head (deformable-sample fine feature quanh tâm box).
+    Appearance-aware ReID head: Lấy mẫu đặc trưng thực tế từ Feature Map quanh box.
     """
     def __init__(self, hidden_dim: int, reid_dim: int,
                  num_heads: int = 8, num_points: int = 8):
@@ -63,6 +63,10 @@ class TransformerReIDHead(nn.Module):
             nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, reid_dim),
         )
+        
+        # BẮT BUỘC: LayerNorm Bottleneck giúp ArcFace hội tụ. 
+        # elementwise_affine=False để không làm lệch phân phối vector trên mặt cầu.
+        self.bottleneck = nn.LayerNorm(reid_dim, elementwise_affine=False)
 
     def _build_value(self, feat: torch.Tensor):
         B, C, H, W = feat.shape
@@ -76,16 +80,63 @@ class TransformerReIDHead(nn.Module):
     def forward(self, det_hs: torch.Tensor,
                 pred_boxes: torch.Tensor,
                 feat: torch.Tensor) -> torch.Tensor:
+        # det_hs: [B, N, C] - Đã được detach() từ Forward
+        # pred_boxes: [B, N, 4] - Đã được detach() từ Forward
+        # feat: [B, C, H, W] - KHÔNG detach để Encoder học ReID
+
         value_list, spatial_shapes = self._build_value(feat)
-
         q   = self.norm_q(det_hs)
-        ref = pred_boxes.unsqueeze(2)        
+        ref = pred_boxes.unsqueeze(2) # [B, N, 1, 4]
 
+        # Lấy mẫu đặc trưng ngoại quan dựa trên tọa độ box dự đoán
         appearance = self.deform_attn(q, ref, value_list, spatial_shapes) 
         appearance = self.norm_attn(appearance)
 
         fused = torch.cat([det_hs, appearance], dim=-1)
-        return self.fuse(fused)
+        emb = self.fuse(fused)
+        
+        return self.bottleneck(emb) # Trả về vector đã chuẩn hóa
+
+
+# --- Cập nhật forward của FalconJDEModel ---
+
+    def forward(self, x: torch.Tensor, targets=None):
+        feats = self.backbone(x)            
+        feats = self.encoder(feats)         
+
+        if self.use_s4:
+            c1 = getattr(self.backbone, '_s4_feat', None)
+            p2 = self.s4_branch(c1, feats[0])
+            dec_feats = [p2, feats[0], feats[1]]
+            reid_feat = p2                  
+        else:
+            dec_feats = feats
+            reid_feat = feats[0]            
+
+        out = self.decoder(dec_feats, targets)
+
+        if self.use_s4 and self.use_s4_aux and self.training:
+            out['pred_s4_aux'] = self.s4_aux_head(p2)   
+
+        if 'eval_hs' in out:
+            hs = out.pop('eval_hs')
+            pred_boxes = out['pred_boxes']
+            
+            # CƠ CHẾ BẢO VỆ: Detach hoàn toàn Queries và Box. 
+            # Nhánh ReID Loss sẽ KHÔNG THỂ phá hủy khả năng Detection của Decoder.
+            hs_det = hs.detach()
+            boxes_det = pred_boxes.detach()
+            
+            # NHƯNG: reid_feat (P2/S4 feature) KHÔNG detach. 
+            # Loss ReID sẽ giúp Encoder/Backbone tinh chỉnh Feature map nhạy hơn với màu sắc/ID.
+            
+            if self.reid_head_type == 'transformer':
+                out['pred_reid'] = self.reid_head(hs_det, boxes_det, reid_feat)
+            else:
+                # Nếu dùng Linear/Context, hãy đảm bảo vẫn đưa reid_feat vào nếu có thể
+                out['pred_reid'] = self.reid_head(hs_det)
+
+        return out
 
 
 class ContextAwareReIDHead(nn.Module):
