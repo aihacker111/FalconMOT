@@ -82,3 +82,12 @@ def remap_dets_7cls_to_5cls(dets: Dict[int, List]) -> Dict[int, List]:
             remapped.append(t)
         out[cls5] = out.get(cls5, []) + remapped
     return out
+
+
+
+
+
+# ── Skip set for ECDetSequenceRunner (5-class eval, model has 7 output classes)
+# After remap the runner only sees indices 0..4 — no need to skip anything.
+# Kept here for documentation; track_ECDet imports this directly.
+SKIP_SET_AFTER_REMAP: set = set()
