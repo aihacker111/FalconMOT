@@ -1,7 +1,20 @@
-"""FalconMOT tracker — clean per-class online MCMOT tracker."""
-from .base import TrackState, BaseTrack, ID2CLS
-from .track import Track
-from .falcon_tracker import FalconTracker
-from . import association
+"""FalconMOT tracking package.
 
-__all__ = ['FalconTracker', 'Track', 'TrackState', 'BaseTrack', 'ID2CLS', 'association']
+Exposes the multi-class tracker and its tracklet class. The `FalconTracker` /
+`Track` aliases are provided so callers can use either the historical
+`MCJDETracker` / `MCTrack` names or the FalconMOT-branded names.
+"""
+
+from .basetrack import MCBaseTrack, TrackState
+from .multitracker import MCJDETracker, MCTrack, id2cls
+
+# Branded aliases
+FalconTracker = MCJDETracker
+Track = MCTrack
+
+__all__ = [
+    'MCJDETracker', 'MCTrack',
+    'FalconTracker', 'Track',
+    'MCBaseTrack', 'TrackState',
+    'id2cls',
+]
