@@ -56,6 +56,23 @@ VISDRONE_ID2NAME = {
 VISDRONE_NAME2ID = {v: k for k, v in VISDRONE_ID2NAME.items()}
 NUM_SOURCE_CLASSES = len(VISDRONE_ID2NAME)
 
+# ---------------------------------------------------------------------------
+# Taxonomy MODEL OUTPUT — 7 class, 0-indexed.
+# Khớp MERGED_CATEGORIES trong scripts/visdrone2coco_7cls_det.py &
+# MERGED_CLS_MAP trong scripts/visdrone2coco_7cls_mot.py (1-indexed -> 0-indexed):
+#   1 pedestrian  2 bicycle  3 car  4 truck  5 tricycle  6 bus  7 motor
+#
+# Đây là taxonomy mà MODEL dự đoán (phía prediction trong track.py), KHÁC với
+# taxonomy 10-class gốc của GT (đọc thô từ annotation VisDrone trong io.py).
+# Hai phía phải remap về CÙNG target order thì motmetrics mới so khớp đúng.
+# ---------------------------------------------------------------------------
+MODEL7_ID2NAME = {
+    0: 'pedestrian', 1: 'bicycle', 2: 'car', 3: 'truck',
+    4: 'tricycle', 5: 'bus', 6: 'motor',
+}
+MODEL7_NAME2ID = {v: k for k, v in MODEL7_ID2NAME.items()}
+NUM_MODEL7_CLASSES = len(MODEL7_ID2NAME)
+
 
 class ClassMergeProfile:
     """Một cách gộp N class gốc -> M class target (M <= N).
@@ -66,7 +83,8 @@ class ClassMergeProfile:
     """
 
     def __init__(self, name: str, raw_to_target_name: Dict[int, Optional[str]],
-                 target_order: List[str]):
+                 target_order: List[str],
+                 pred_to_target_name: Optional[Dict[int, Optional[str]]] = None):
         self.name = name
         self.target_order = list(target_order)
         self.target_name2id = {n: i for i, n in enumerate(self.target_order)}
@@ -82,18 +100,61 @@ class ClassMergeProfile:
                     f"[{name}] target '{tgt_name}' (tu raw={VISDRONE_ID2NAME[raw_id]}) "
                     f"khong nam trong target_order={self.target_order}")
 
+        # GT side: raw VisDrone 10-class (0-indexed) -> target id | None(drop)
         self.raw_to_target_id: Dict[int, Optional[int]] = {
             raw_id: (self.target_name2id[tgt_name] if tgt_name is not None else None)
             for raw_id, tgt_name in self.raw_to_target_name.items()
         }
+
+        # ── Prediction side: model output taxonomy (7-class) -> target ──────
+        # Bắt buộc có cho các profile dùng với model 7-class. Nếu None thì
+        # remap_pred() trả về passthrough (giữ nguyên id model) — chỉ hợp lệ
+        # khi model output đã trùng target order.
+        self.pred_to_target_name = (dict(pred_to_target_name)
+                                    if pred_to_target_name is not None else None)
+        self.pred_to_target_id: Optional[Dict[int, Optional[int]]] = None
+        if self.pred_to_target_name is not None:
+            missing_p = set(range(NUM_MODEL7_CLASSES)) - set(self.pred_to_target_name)
+            if missing_p:
+                missing_pn = [MODEL7_ID2NAME[i] for i in sorted(missing_p)]
+                raise ValueError(
+                    f"[{name}] thieu pred mapping cho model class: {missing_pn}")
+            for p_id, tgt_name in self.pred_to_target_name.items():
+                if tgt_name is not None and tgt_name not in self.target_name2id:
+                    raise ValueError(
+                        f"[{name}] pred target '{tgt_name}' (tu model="
+                        f"{MODEL7_ID2NAME[p_id]}) khong nam trong "
+                        f"target_order={self.target_order}")
+            self.pred_to_target_id = {
+                p_id: (self.target_name2id[tgt_name] if tgt_name is not None else None)
+                for p_id, tgt_name in self.pred_to_target_name.items()
+            }
 
     @property
     def num_target_classes(self) -> int:
         return len(self.target_order)
 
     def remap(self, raw_cls_id_0idx: int) -> Optional[int]:
-        """raw 0-indexed -> target 0-indexed, hoặc None nếu profile drop class này."""
+        """[GT side] raw VisDrone 10-class 0-indexed -> target 0-indexed,
+        hoặc None nếu profile drop class này."""
         return self.raw_to_target_id.get(raw_cls_id_0idx)
+
+    def remap_pred(self, model_cls_id_0idx: int) -> Optional[int]:
+        """[Prediction side] model 7-class 0-indexed -> target 0-indexed,
+        hoặc None nếu profile drop class này.
+
+        Nếu profile không khai báo pred mapping -> passthrough (giữ nguyên id);
+        chỉ đúng khi model output đã trùng target order.
+        """
+        if self.pred_to_target_id is None:
+            return model_cls_id_0idx
+        return self.pred_to_target_id.get(model_cls_id_0idx)
+
+    def target_id2name(self, target_id_0idx: int) -> str:
+        """target 0-indexed -> tên class target (vd 0 -> 'pedestrian')."""
+        if 0 <= target_id_0idx < len(self.target_order):
+            return self.target_order[target_id_0idx]
+        return str(target_id_0idx)
 
     def describe(self) -> str:
         groups: Dict[str, List[str]] = {n: [] for n in self.target_order}
@@ -135,6 +196,17 @@ VISDRONE_5CLASS_MERGE_BENCHMARK = ClassMergeProfile(
         VISDRONE_NAME2ID['bus']:             'bus',
         VISDRONE_NAME2ID['motor']:           None,
     },
+    # MODEL 7-class output -> 5 target. Khớp đúng dataset benchmark đã gen
+    # (pedestrian/car/truck/tricycle/bus, drop bicycle+motor).
+    pred_to_target_name={
+        MODEL7_NAME2ID['pedestrian']: 'pedestrian',
+        MODEL7_NAME2ID['bicycle']:    None,        # DROP — không bôi đen, không vẽ
+        MODEL7_NAME2ID['car']:        'car',
+        MODEL7_NAME2ID['truck']:      'truck',
+        MODEL7_NAME2ID['tricycle']:   'tricycle',
+        MODEL7_NAME2ID['bus']:        'bus',
+        MODEL7_NAME2ID['motor']:      None,         # DROP — không bôi đen, không vẽ
+    },
 )
 
 _PROFILES: Dict[str, ClassMergeProfile] = {
@@ -169,6 +241,15 @@ VISDRONE_5CLASS_MERGE_COMPETITION = ClassMergeProfile(
         VISDRONE_NAME2ID['bus']:             None,
         VISDRONE_NAME2ID['motor']:           'motorcycle',
     },
+    pred_to_target_name={
+        MODEL7_NAME2ID['pedestrian']: 'person',
+        MODEL7_NAME2ID['bicycle']:    'bicycle',
+        MODEL7_NAME2ID['car']:        'car',
+        MODEL7_NAME2ID['truck']:      'truck',
+        MODEL7_NAME2ID['tricycle']:   None,          # DROP
+        MODEL7_NAME2ID['bus']:        None,          # DROP
+        MODEL7_NAME2ID['motor']:      'motorcycle',
+    },
 )
 _PROFILES['5class_merge_competition'] = VISDRONE_5CLASS_MERGE_COMPETITION
 
@@ -197,7 +278,7 @@ def get_active_profile() -> Optional[ClassMergeProfile]:
 
 
 def remap_raw_cls_id(raw_cls_id_0idx: int) -> Optional[int]:
-    """Áp dụng active profile (nếu có) lên 1 raw class id (0-indexed).
+    """[GT side] Áp dụng active profile lên 1 raw VisDrone 10-class id (0-indexed).
 
     Trả về:
       - target 0-indexed class id, nếu có active profile và class được giữ
@@ -208,6 +289,32 @@ def remap_raw_cls_id(raw_cls_id_0idx: int) -> Optional[int]:
     if profile is None:
         return raw_cls_id_0idx
     return profile.remap(raw_cls_id_0idx)
+
+
+def remap_pred_cls_id(model_cls_id_0idx: int) -> Optional[int]:
+    """[Prediction side] Áp dụng active profile lên 1 MODEL output class id
+    (0-indexed, theo taxonomy 7-class mà model được train).
+
+    Trả về:
+      - target 0-indexed class id, nếu có active profile và class được giữ
+      - model_cls_id_0idx nguyên bản, nếu KHÔNG có active profile (passthrough)
+      - None, nếu active profile drop class này (vd bicycle/motor ở benchmark)
+
+    Tách riêng khỏi remap_raw_cls_id vì GT đọc 10-class thô còn model output
+    chỉ 7-class — index KHÔNG trùng nhau, dùng chung sẽ map sai class.
+    """
+    profile = get_active_profile()
+    if profile is None:
+        return model_cls_id_0idx
+    return profile.remap_pred(model_cls_id_0idx)
+
+
+def target_id2name(target_id_0idx: int) -> str:
+    """target 0-indexed -> tên class target hiện hành (rỗng nếu không có profile)."""
+    profile = get_active_profile()
+    if profile is None:
+        return VISDRONE_ID2NAME.get(target_id_0idx, str(target_id_0idx))
+    return profile.target_id2name(target_id_0idx)
 
 
 def num_active_classes(fallback: int) -> int:

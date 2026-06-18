@@ -193,7 +193,8 @@ def plot_tracks(image,
                 num_classes,
                 scores=0,
                 frame_id=0,
-                fps=0.0):
+                fps=0.0,
+                cls_id2name=None):
     """
     :rtype:
     :param image:
@@ -203,6 +204,9 @@ def plot_tracks(image,
     :param scores:
     :param frame_id:
     :param fps:
+    :param cls_id2name: optional dict {cls_id: tên class target} -> nếu có sẽ
+        ghi kèm tên class (vd 'car') phía trên ID. Class không có trong dict
+        coi như đã bị drop -> KHÔNG vẽ.
     :return:
     """
     img = np.ascontiguousarray(np.copy(image))
@@ -218,14 +222,21 @@ def plot_tracks(image,
     # radius = max(5, int(im_w / 140.))
 
     for cls_id in range(num_classes):
+        # Nếu có whitelist cls_id2name mà class này không nằm trong đó -> drop,
+        # không vẽ (bicycle/motor ở chế độ 5class_merge_benchmark).
+        if cls_id2name is not None and cls_id not in cls_id2name:
+            continue
         cls_tlwhs = tlwhs_dict[cls_id]
         obj_ids = obj_ids_dict[cls_id]
+        cls_name = cls_id2name.get(cls_id) if cls_id2name is not None else None
 
         for i, tlwh_i in enumerate(cls_tlwhs):
             x1, y1, w, h = tlwh_i
             int_box = tuple(map(int, (x1, y1, x1 + w, y1 + h)))  # x1, y1, x2, y2
             obj_id = int(obj_ids[i])
             id_text = '{}'.format(int(obj_id))
+            if cls_name:
+                id_text = '{} {}'.format(cls_name, int(obj_id))
             # score_text = '%.2f' % scores
             _line_thickness = 1 if obj_id <= 0 else line_thickness
             color = get_color(abs(obj_id))  # 给定颜色
