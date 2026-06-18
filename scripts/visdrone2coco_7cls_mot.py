@@ -255,7 +255,7 @@ def main():
         description='Convert VisDrone2019-MOT → COCO JSON for training.')
     ap.add_argument('--visdrone_root', default='/workspace')
     ap.add_argument('--output_root',   default='/workspace/VisDrone2019-COCO')
-    ap.add_argument('--splits', nargs='+', default=['train', 'val'],
+    ap.add_argument('--splits', nargs='+', default=['train', 'val', 'test-dev'],
                     choices=['train', 'val', 'test-dev'])
     ap.add_argument('--workers', type=int, default=8,
                     help='parallel threads for image I/O per sequence')
