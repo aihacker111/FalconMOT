@@ -445,5 +445,5 @@ if __name__ == '__main__':
     ap.add_argument('--visdrone_root', default='/workspace/VisDrone2019')
     ap.add_argument('--output_root', default='/workspace/VisDrone2019-COCO-5cls')
     args = ap.parse_args()
-    for split in ['train', 'val', 'test-dev']:
+    for split in ['test-dev']:
         convert_split(os.path.join(args.visdrone_root, f'VisDrone2019-MOT-{split}'), os.path.join(args.output_root, split), split)
