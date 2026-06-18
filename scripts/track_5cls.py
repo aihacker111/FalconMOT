@@ -284,5 +284,5 @@ if __name__ == '__main__':
         img_root=img_root,
         exp_name='ecdet_visdrone_5cls',
         show_image=False,
-        save_images=False,
+        save_images=True,
     )
