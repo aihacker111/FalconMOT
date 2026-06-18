@@ -265,9 +265,9 @@ if __name__ == '__main__':
     # --img_root  : thư mục ảnh (images/) của bộ test-dev COCO 5cls
     # --ann_file  : file instances_test-dev.json
     # Nếu opts chưa có 2 field này, dùng argparse thêm vào hoặc hardcode:
-    img_root = getattr(opt, 'img_root',
+    img_root = getattr(opt, 'track_img_root',
                        '/data/VisDrone2019-COCO-5cls/test-dev/images')
-    ann_file = getattr(opt, 'ann_file',
+    ann_file = getattr(opt, 'track_ann_file',
                        '/data/VisDrone2019-COCO-5cls/test-dev/annotations/instances_test-dev.json')
 
     assert osp.isdir(img_root),  f'img_root not found: {img_root}'
