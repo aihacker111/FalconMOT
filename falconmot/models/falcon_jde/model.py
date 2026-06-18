@@ -224,7 +224,8 @@ class FalconJDEModel(nn.Module):
             c1 = getattr(self.backbone, '_s4_feat', None)
             p2 = self.s4_branch(c1, feats[0])
             dec_feats = [p2, feats[0], feats[1]]
-            reid_feat = p2                  
+            # reid_feat = p2    
+            reid_feat = feats[0]              
         else:
             dec_feats = feats
             reid_feat = feats[0]            
