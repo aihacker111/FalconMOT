@@ -395,6 +395,7 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
         print('[track-eval] thiếu val_ann/val_img — bỏ qua tracking eval.')
         return {}
     opt = opts().init()
+    opt.device = f'cuda:{opt.gpus[0]}' if opt.gpus[0] >= 0 else 'cpu'
     model.eval()
     net_w, net_h = opt.img_size                      # opt.img_size = (W, H)
     ncls     = opt.num_classes

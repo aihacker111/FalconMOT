@@ -392,7 +392,7 @@ class opts(object):
         h_w = default_dataset_info[opt.task]['default_input_wh']
         opt.img_size = (h_w[1], h_w[0])
         print('Net input: {:d}×{:d}'.format(h_w[1], h_w[0]))
-
+        
         dataset     = Struct(default_dataset_info[opt.task])
         opt.dataset = dataset.dataset
         opt = self.update_dataset_info_and_set_heads(opt, dataset)
