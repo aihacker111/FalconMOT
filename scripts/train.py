@@ -394,9 +394,9 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
     if not (val_ann_file and val_img_root and os.path.isfile(val_ann_file)):
         print('[track-eval] thiếu val_ann/val_img — bỏ qua tracking eval.')
         return {}
-
+    opt = opts().init()
     model.eval()
-    net_w, net_h = opt.input_wh                      # opt.img_size = (W, H)
+    net_w, net_h = opt.img_size                      # opt.img_size = (W, H)
     ncls     = opt.num_classes
     min_area = getattr(opt, 'min_box_area', 100)
     use_fp16 = bool(getattr(opt, 'track_val_fp16', 1)) and opt.device.type == 'cuda'
