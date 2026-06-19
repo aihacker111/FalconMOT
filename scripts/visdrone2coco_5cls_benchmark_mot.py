@@ -219,7 +219,7 @@ if __name__ == '__main__':
     args = ap.parse_args()
 
     for split in args.splits:
-        src = os.path.join(args.visdrone_root, f'VisDrone2019-MOT-{split}')
+        src = os.path.join(args.visdrone_root, f'VisDrone2019-MOT-{split}') or os.path.join(args.visdrone_root, f'Visdrone2019-{split}')
         dst = os.path.join(args.output_root, split)
         if not os.path.isdir(src):
             print(f'[Error] Not found: {src}')
