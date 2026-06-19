@@ -55,8 +55,10 @@ class TransformerReIDHead(nn.Module):
             embed_dim=hidden_dim, num_heads=num_heads,
             num_levels=1, num_points=num_points, method='default',
         )
-        self.norm_q    = RMSNorm(hidden_dim)
-        self.norm_attn = RMSNorm(hidden_dim)
+        # self.norm_q    = RMSNorm(hidden_dim)
+        # self.norm_attn = RMSNorm(hidden_dim)
+        self.norm_q    = nn.LayerNorm(hidden_dim)
+        self.norm_attn = nn.LayerNorm(hidden_dim)
 
         self.fuse = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
@@ -224,8 +226,7 @@ class FalconJDEModel(nn.Module):
             c1 = getattr(self.backbone, '_s4_feat', None)
             p2 = self.s4_branch(c1, feats[0])
             dec_feats = [p2, feats[0], feats[1]]
-            # reid_feat = p2    
-            reid_feat = feats[0]              
+            reid_feat = p2
         else:
             dec_feats = feats
             reid_feat = feats[0]            
