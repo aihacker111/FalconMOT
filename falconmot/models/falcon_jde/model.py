@@ -155,13 +155,93 @@ class TransformerReIDHead(nn.Module):
         
         return self.bottleneck(emb)
 
+# class ContextAwareReIDHead(nn.Module):
+#     """
+#     Spatial & Visual Context-Aware ReID Head (Đã sửa lỗi không hội tụ).
+#     Kết hợp: 
+#       1. Đặc trưng ngoại quan thực tế (Visual Feature) từ reid_feat qua Deformable Attention.
+#       2. Ngữ cảnh vị trí (Spatial Context) từ tọa độ Bounding Box.
+#       3. Trạng thái ẩn của Query (det_hs).
+#     """
+#     def __init__(self, hidden_dim: int, reid_dim: int, num_heads: int = 8, num_points: int = 8):
+#         super().__init__()
+#         num_heads = _largest_divisor(hidden_dim) if hidden_dim % num_heads else num_heads
+#         self.hidden_dim = hidden_dim
+#         self.num_heads  = num_heads
+
+#         # 1. Nhánh trích xuất đặc trưng hình học (Spatial BBox)
+#         self.bbox_embed = nn.Sequential(
+#             nn.Linear(4, hidden_dim),
+#             nn.SiLU(inplace=True),
+#             nn.Linear(hidden_dim, hidden_dim),
+#             nn.LayerNorm(hidden_dim)
+#         )
+
+#         # 2. Nhánh trích xuất đặc trưng ngoại quan thực tế từ Feature Map (Visual)
+#         self.value_proj = nn.Linear(hidden_dim, hidden_dim)
+#         self.deform_attn = MSDeformableAttention(
+#             embed_dim=hidden_dim, num_heads=num_heads,
+#             num_levels=1, num_points=num_points, method='default',
+#         )
+        
+#         # 3. Các lớp chuẩn hóa phân phối đầu vào
+#         self.norm_q    = nn.LayerNorm(hidden_dim)
+#         self.norm_attn = nn.LayerNorm(hidden_dim)
+
+#         # 4. Hàm thiết kế Fusion: Kết hợp [Query gốc + Cực cục bộ Visual + Ngữ cảnh Không gian]
+#         # Nhân 3 lần hidden_dim vì cat 3 thành phần
+#         self.fuse = nn.Sequential(
+#             nn.Linear(hidden_dim * 3, hidden_dim),
+#             nn.SiLU(inplace=True),
+#             nn.Linear(hidden_dim, reid_dim),
+#         )
+        
+#         # BẮT BUỘC: Lớp bottleneck không tham số để đưa vector lên mặt cầu ArcFace chuẩn nhất
+#         self.bottleneck = nn.LayerNorm(reid_dim, elementwise_affine=False)
+
+#     def _build_value(self, feat: torch.Tensor):
+#         B, C, H, W = feat.shape
+#         v = feat.flatten(2).permute(0, 2, 1)          
+#         v = self.value_proj(v)                        
+#         head_dim = C // self.num_heads
+#         v = v.reshape(B, H * W, self.num_heads, head_dim)
+#         v = v.permute(0, 2, 3, 1).contiguous()        
+#         return [v], [[H, W]]
+
+#     def forward(self, det_hs: torch.Tensor, pred_boxes: torch.Tensor, feat: torch.Tensor = None, **kwargs) -> torch.Tensor:
+#         # det_hs: [B, N, C]
+#         # pred_boxes: [B, N, 4]
+#         # feat: [B, C, H, W] -> Chính là reid_feat (Stride 4) truyền từ forward model vào
+
+#         if feat is None:
+#             raise ValueError("ContextAwareReIDHead bắt buộc phải có thông tin 'feat' (reid_feat) từ Feature Map!")
+
+#         # Bước A: Lấy mẫu đặc trưng ảnh xung quanh vị trí Box (Visual Feature)
+#         value_list, spatial_shapes = self._build_value(feat)
+#         q   = self.norm_q(det_hs)
+#         ref = pred_boxes.unsqueeze(2) # [B, N, 1, 4]
+        
+#         appearance = self.deform_attn(q, ref, value_list, spatial_shapes) 
+#         appearance = self.norm_attn(appearance)
+
+#         # Bước B: Nhúng tọa độ hình học (Spatial Feature)
+#         spatial_emb = self.bbox_embed(pred_boxes)
+
+#         # Bước C: Ép cả 3 thành phần đồng bộ biên độ và ghép lại với nhau
+#         # q (thông tin gốc), appearance (thông tin pixel), spatial_emb (vị trí tương đối)
+#         fused = torch.cat([q, appearance, spatial_emb], dim=-1) # [B, N, hidden_dim * 3]
+        
+#         # Bước D: Chiếu về không gian ReID và đưa lên mặt cầu ArcFace
+#         emb = self.fuse(fused)
+#         return self.bottleneck(emb)
+
+
+
 class ContextAwareReIDHead(nn.Module):
     """
-    Spatial & Visual Context-Aware ReID Head (Đã sửa lỗi không hội tụ).
-    Kết hợp: 
-      1. Đặc trưng ngoại quan thực tế (Visual Feature) từ reid_feat qua Deformable Attention.
-      2. Ngữ cảnh vị trí (Spatial Context) từ tọa độ Bounding Box.
-      3. Trạng thái ẩn của Query (det_hs).
+    Spatial & Visual Context-Aware ReID Head — Phiên bản Transformer Decoupling & LNNeck.
+    Sử dụng Cross-Attention để phân tách hoàn toàn đặc trưng định danh (ReID)
+    khỏi đặc trưng hình học và phân loại của Detection Head.
     """
     def __init__(self, hidden_dim: int, reid_dim: int, num_heads: int = 8, num_points: int = 8):
         super().__init__()
@@ -184,20 +264,33 @@ class ContextAwareReIDHead(nn.Module):
             num_levels=1, num_points=num_points, method='default',
         )
         
-        # 3. Các lớp chuẩn hóa phân phối đầu vào
         self.norm_q    = nn.LayerNorm(hidden_dim)
         self.norm_attn = nn.LayerNorm(hidden_dim)
 
-        # 4. Hàm thiết kế Fusion: Kết hợp [Query gốc + Cực cục bộ Visual + Ngữ cảnh Không gian]
-        # Nhân 3 lần hidden_dim vì cat 3 thành phần
-        self.fuse = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, reid_dim),
-        )
+        # 3. TRANSFORMER DECOUPLING BLOCK (Màng lọc định tuyến thông tin)
+        # Chiếu det_hs sang một không gian truy vấn ReID độc lập
+        self.reid_query_proj = nn.Linear(hidden_dim, hidden_dim)
         
-        # BẮT BUỘC: Lớp bottleneck không tham số để đưa vector lên mặt cầu ArcFace chuẩn nhất
+        # Cross-Attention đóng vai trò lọc và chặn đứng các gradient xung đột
+        self.decouple_cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads, batch_first=True
+        )
+        self.norm_cross = nn.LayerNorm(hidden_dim)
+        
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.SiLU(inplace=True),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
+
+        # 4. Lớp tuyến tính ánh xạ về số chiều đặc trưng ReID
+        self.reid_proj = nn.Linear(hidden_dim, reid_dim)
+        
+        # 5. LNNeck Bottleneck phục vụ riêng cho CE Loss (affine=True để học scale động)
         self.bottleneck = nn.LayerNorm(reid_dim, elementwise_affine=False)
+        nn.init.constant_(self.bottleneck.bias, 0.0)
+        nn.init.constant_(self.bottleneck.weight, 1.0)
 
     def _build_value(self, feat: torch.Tensor):
         B, C, H, W = feat.shape
@@ -208,32 +301,44 @@ class ContextAwareReIDHead(nn.Module):
         v = v.permute(0, 2, 3, 1).contiguous()        
         return [v], [[H, W]]
 
-    def forward(self, det_hs: torch.Tensor, pred_boxes: torch.Tensor, feat: torch.Tensor = None, **kwargs) -> torch.Tensor:
-        # det_hs: [B, N, C]
-        # pred_boxes: [B, N, 4]
-        # feat: [B, C, H, W] -> Chính là reid_feat (Stride 4) truyền từ forward model vào
-
+    def forward(self, det_hs: torch.Tensor, pred_boxes: torch.Tensor, feat: torch.Tensor = None, **kwargs) -> dict:
         if feat is None:
             raise ValueError("ContextAwareReIDHead bắt buộc phải có thông tin 'feat' (reid_feat) từ Feature Map!")
 
-        # Bước A: Lấy mẫu đặc trưng ảnh xung quanh vị trí Box (Visual Feature)
+        # BẮT BUỘC: Chủ động detach() để bảo vệ luồng học định vị và phân loại của Decoder
+        det_hs_detached = det_hs.detach()
+        pred_boxes_detached = pred_boxes.detach()
+
+        # Bước A: Lấy mẫu đặc trưng ảnh cục bộ (Visual Feature)
         value_list, spatial_shapes = self._build_value(feat)
-        q   = self.norm_q(det_hs)
-        ref = pred_boxes.unsqueeze(2) # [B, N, 1, 4]
+        q   = self.norm_q(det_hs_detached)
+        ref = pred_boxes_detached.unsqueeze(2) # [B, N, 1, 4]
         
         appearance = self.deform_attn(q, ref, value_list, spatial_shapes) 
         appearance = self.norm_attn(appearance)
 
         # Bước B: Nhúng tọa độ hình học (Spatial Feature)
-        spatial_emb = self.bbox_embed(pred_boxes)
+        spatial_emb = self.bbox_embed(pred_boxes_detached)
 
-        # Bước C: Ép cả 3 thành phần đồng bộ biên độ và ghép lại với nhau
-        # q (thông tin gốc), appearance (thông tin pixel), spatial_emb (vị trí tương đối)
-        fused = torch.cat([q, appearance, spatial_emb], dim=-1) # [B, N, hidden_dim * 3]
+        # Bước C: Transformer Cross-Attention Decoupling
+        reid_query = self.reid_query_proj(det_hs_detached) + spatial_emb
+        attn_out, _ = self.decouple_cross_attn(
+            query=reid_query, 
+            key=appearance, 
+            value=appearance
+        )
+        x = self.norm_cross(reid_query + attn_out)
+        x = x + self.ffn(x)
         
-        # Bước D: Chiếu về không gian ReID và đưa lên mặt cầu ArcFace
-        emb = self.fuse(fused)
-        return self.bottleneck(emb)
+        # Bước D: Ánh xạ và LNNeck trích xuất luồng kép
+        emb_raw = self.reid_proj(x)            # Phục vụ Triplet (Euclid tự do, không bị nén mặt cầu)
+        emb_norm = self.bottleneck(emb_raw)    # Phục vụ CE / ArcFace (Đã qua chuẩn hóa phân phối ổn định)
+        
+        return {
+            'emb_raw': emb_raw,
+            'emb_norm': emb_norm
+        }
+
 
 
 class S4AuxiliaryHead(nn.Module):
@@ -335,10 +440,14 @@ class FalconJDEModel(nn.Module):
             if self.reid_head_type == 'transformer':
                 out['pred_reid'] = self.reid_head(hs_det, boxes_det, reid_feat)
             elif self.reid_head_type == 'context_aware':
-                # SỬA TẠI ĐÂY: Truyền thêm reid_feat vào cho head xử lý ngữ cảnh không gian + thị giác
-                out['pred_reid'] = self.reid_head(hs_det, boxes_det, reid_feat)
-            # elif self.reid_head_type == 'context_aware':
-            #     out['pred_reid'] = self.reid_head(hs_det, boxes_det)
+                reid_outputs = self.reid_head(hs_det, boxes_det, reid_feat)
+                if isinstance(reid_outputs, dict):
+                    # outputs của Head mới trả về luồng kép:
+                    out['pred_reid'] = reid_outputs['emb_norm']     # Cho CE / ArcFace & Eval
+                    out['pred_reid_raw'] = reid_outputs['emb_raw']   # Cho Triplet
+                else:
+                    out['pred_reid'] = reid_outputs
+
             else:
                 out['pred_reid'] = self.reid_head(hs_det)
 

@@ -237,16 +237,68 @@ class FalconJDECriterion(nn.Module):
     # ReID loss
     # ------------------------------------------------------------------
 
+    # def loss_reid(self, outputs, targets, indices) -> dict:
+    #     if 'pred_reid' not in outputs:
+    #         return {}
+
+    #     pred_reid = outputs['pred_reid']   # (B, N_det, D)
+    #     dev = pred_reid.device
+    #     reid_loss = pred_reid.sum() * 0.0
+
+    #     cls_emb = {cid: [] for cid in self.nid_dict}
+    #     cls_ids = {cid: [] for cid in self.nid_dict}
+
+    #     for b_idx, (src_idx, tgt_idx) in enumerate(indices):
+    #         if len(src_idx) == 0:
+    #             continue
+    #         t      = targets[b_idx]
+    #         labels = t['labels'].to(dev)[tgt_idx.to(dev)]
+    #         tids   = t['track_ids'].to(dev)[tgt_idx.to(dev)]
+    #         valid  = tids >= 0
+    #         if not valid.any():
+    #             continue
+    #         emb_all = pred_reid[b_idx][src_idx.to(dev)[valid]]
+    #         lbl_all = labels[valid]
+    #         ids_all = tids[valid]
+
+    #         for cls_id in self.nid_dict:
+    #             mask = (lbl_all == cls_id)
+    #             if not mask.any():
+    #                 continue
+    #             cls_emb[cls_id].append(emb_all[mask])
+    #             cls_ids[cls_id].append(ids_all[mask])
+
+    #     n_active = 0
+    #     for cls_id in self.nid_dict:
+    #         if not cls_emb[cls_id]:
+    #             continue
+    #         emb_cat = torch.cat(cls_emb[cls_id], dim=0)
+    #         ids_cat = torch.cat(cls_ids[cls_id], dim=0)
+    #         if self.use_arcface:
+    #             pred = self.classifiers[str(cls_id)](emb_cat, ids_cat)
+    #         else:
+    #             pred = self.linear_classifiers[str(cls_id)](emb_cat)
+    #         reid_loss = reid_loss + self.ce_loss(pred, ids_cat)
+    #         if self.use_triplet and emb_cat.shape[0] >= 2:
+    #             reid_loss = reid_loss + self.triplet(F.normalize(emb_cat, dim=-1), ids_cat)
+    #         n_active += 1
+
+    #     if n_active > 1:
+    #         reid_loss = reid_loss / n_active
+    #     return {'loss_reid': reid_loss}
     def loss_reid(self, outputs, targets, indices) -> dict:
-        if 'pred_reid' not in outputs:
+        # Kiểm tra xem Model có hỗ trợ luồng kép (emb_norm và emb_raw) từ Head Decouple hay không
+        has_dual_stream = 'pred_reid' in outputs and 'pred_reid_raw' in outputs
+        if not has_dual_stream and 'pred_reid' not in outputs:
             return {}
 
-        pred_reid = outputs['pred_reid']   # (B, N_det, D)
-        dev = pred_reid.device
-        reid_loss = pred_reid.sum() * 0.0
+        pred_reid_norm = outputs['pred_reid'] # Luồng đã chuẩn hóa (emb_norm)
+        dev = pred_reid_norm.device
+        reid_loss = pred_reid_norm.sum() * 0.0
 
-        cls_emb = {cid: [] for cid in self.nid_dict}
-        cls_ids = {cid: [] for cid in self.nid_dict}
+        cls_emb_norm = {cid: [] for cid in self.nid_dict}
+        cls_emb_raw  = {cid: [] for cid in self.nid_dict}
+        cls_ids      = {cid: [] for cid in self.nid_dict}
 
         for b_idx, (src_idx, tgt_idx) in enumerate(indices):
             if len(src_idx) == 0:
@@ -257,30 +309,49 @@ class FalconJDECriterion(nn.Module):
             valid  = tids >= 0
             if not valid.any():
                 continue
-            emb_all = pred_reid[b_idx][src_idx.to(dev)[valid]]
+            
+            src_idx_gpu = src_idx.to(dev)[valid]
+            emb_norm_all = pred_reid_norm[b_idx][src_idx_gpu]
             lbl_all = labels[valid]
             ids_all = tids[valid]
+            
+            # Nếu có luồng thô (emb_raw), trích xuất song song
+            if has_dual_stream:
+                emb_raw_all = outputs['pred_reid_raw'][b_idx][src_idx_gpu]
 
             for cls_id in self.nid_dict:
                 mask = (lbl_all == cls_id)
                 if not mask.any():
                     continue
-                cls_emb[cls_id].append(emb_all[mask])
+                cls_emb_norm[cls_id].append(emb_norm_all[mask])
+                if has_dual_stream:
+                    cls_emb_raw[cls_id].append(emb_raw_all[mask])
                 cls_ids[cls_id].append(ids_all[mask])
 
         n_active = 0
         for cls_id in self.nid_dict:
-            if not cls_emb[cls_id]:
+            if not cls_emb_norm[cls_id]:
                 continue
-            emb_cat = torch.cat(cls_emb[cls_id], dim=0)
-            ids_cat = torch.cat(cls_ids[cls_id], dim=0)
+            emb_norm_cat = torch.cat(cls_emb_norm[cls_id], dim=0)
+            ids_cat      = torch.cat(cls_ids[cls_id], dim=0)
+
+            # 1. Tính toán CE Loss / ArcFace (Dùng luồng ĐÃ chuẩn hóa)
             if self.use_arcface:
-                pred = self.classifiers[str(cls_id)](emb_cat, ids_cat)
+                pred = self.classifiers[str(cls_id)](emb_norm_cat, ids_cat)
             else:
-                pred = self.linear_classifiers[str(cls_id)](emb_cat)
+                pred = self.linear_classifiers[str(cls_id)](emb_norm_cat)
             reid_loss = reid_loss + self.ce_loss(pred, ids_cat)
-            if self.use_triplet and emb_cat.shape[0] >= 2:
-                reid_loss = reid_loss + self.triplet(F.normalize(emb_cat, dim=-1), ids_cat)
+
+            # 2. Tính toán Triplet Loss (Dùng luồng CHƯA chuẩn hóa, loại bỏ hoàn toàn F.normalize)
+            if self.use_triplet and emb_norm_cat.shape[0] >= 2:
+                if has_dual_stream:
+                    emb_triplet_cat = torch.cat(cls_emb_raw[cls_id], dim=0)
+                else:
+                    emb_triplet_cat = emb_norm_cat # Tự động fallback nếu dùng head cũ
+                
+                # KHÔNG dùng L2 Normalize để giải phóng không gian Euclid tự do cho Triplet
+                reid_loss = reid_loss + self.triplet(emb_triplet_cat, ids_cat)
+            
             n_active += 1
 
         if n_active > 1:
