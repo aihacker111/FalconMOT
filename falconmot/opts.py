@@ -245,6 +245,12 @@ class opts(object):
                                  help='detection confidence threshold')
         self.parser.add_argument('--track_buffer', type=int, default=30)
         # ── Tracking-metric validation (chọn model_best theo IDF1/MOTA) ──
+        self.parser.add_argument('--emb_weight', type=float, default=1.0,
+                                 help='ReID weight in association fusion. '
+                                      '1.0=original, 0.0=IoU-only, in-between=blend.')
+        self.parser.add_argument('--emb_gate', type=float, default=0.0,
+                                 help='Chỉ áp embedding khi id_sim >= ngưỡng này; '
+                                      'dưới ngưỡng dùng IoU thuần. 0.0=tắt gating.')
         self.parser.add_argument('--track_val', action='store_true',
                                  help='bật validation tracking (IDF1/MOTA) để chọn model_best '
                                       'thay cho COCO mAP. Cần --val_cfg có val_ann + val_img (COCO).')
@@ -392,7 +398,7 @@ class opts(object):
         h_w = default_dataset_info[opt.task]['default_input_wh']
         opt.img_size = (h_w[1], h_w[0])
         print('Net input: {:d}×{:d}'.format(h_w[1], h_w[0]))
-        
+
         dataset     = Struct(default_dataset_info[opt.task])
         opt.dataset = dataset.dataset
         opt = self.update_dataset_info_and_set_heads(opt, dataset)
