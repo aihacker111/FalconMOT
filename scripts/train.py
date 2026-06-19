@@ -400,7 +400,7 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
     net_w, net_h = opt.img_size                      # opt.img_size = (W, H)
     ncls     = opt.num_classes
     min_area = getattr(opt, 'min_box_area', 100)
-    use_fp16 = bool(getattr(opt, 'track_val_fp16', 1)) and opt.device.type == 'cuda'
+    # use_fp16 = bool(getattr(opt, 'track_val_fp16', 1)) and opt.device.type == 'cuda'
     _OFF     = 1_000_000                             # phải khớp _CLS_ID_OFFSET trong coco_gt_reader
 
     postproc = FalconJDEPostProcessor(
@@ -434,11 +434,11 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
             sizes = torch.tensor([[orig_h, orig_w]], device=opt.device)
             blob  = torch.from_numpy(img[None]).to(opt.device)
 
-            if use_fp16:
-                with torch.cuda.amp.autocast():
-                    output = model(blob)
-            else:
-                output = model(blob)
+            # if use_fp16:
+            #     with torch.cuda.amp.autocast():
+            #         output = model(blob)
+            # else:
+            output = model(blob)
             res = postproc(output, sizes)[0]
 
             # decode -> per-class MCTrack (native class space)
