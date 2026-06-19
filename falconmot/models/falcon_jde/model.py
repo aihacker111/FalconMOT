@@ -289,8 +289,6 @@ class ContextAwareReIDHead(nn.Module):
         
         # 5. LNNeck Bottleneck phục vụ riêng cho CE Loss (affine=True để học scale động)
         self.bottleneck = nn.LayerNorm(reid_dim, elementwise_affine=False)
-        nn.init.constant_(self.bottleneck.bias, 0.0)
-        nn.init.constant_(self.bottleneck.weight, 1.0)
 
     def _build_value(self, feat: torch.Tensor):
         B, C, H, W = feat.shape
