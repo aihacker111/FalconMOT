@@ -331,7 +331,7 @@ class FalconJDEModel(nn.Module):
             # để đảm bảo Gradient của loss_reid không chạy ngược phá hỏng Decoder.
             hs_det = hs.detach()
             boxes_det = pred_boxes.detach()
-            
+            reid_feat = reid_feat.detach()
             if self.reid_head_type == 'transformer':
                 out['pred_reid'] = self.reid_head(hs_det, boxes_det, reid_feat)
             elif self.reid_head_type == 'context_aware':
