@@ -39,9 +39,69 @@ def _largest_divisor(dim: int, candidates=(8, 6, 4, 3, 2, 1)) -> int:
     return 1
 
 
+# class TransformerReIDHead(nn.Module):
+#     """
+#     Appearance-aware ReID head: Lấy mẫu đặc trưng thực tế từ Feature Map quanh box.
+#     """
+#     def __init__(self, hidden_dim: int, reid_dim: int,
+#                  num_heads: int = 8, num_points: int = 8):
+#         super().__init__()
+#         num_heads = _largest_divisor(hidden_dim) if hidden_dim % num_heads else num_heads
+#         self.hidden_dim = hidden_dim
+#         self.num_heads  = num_heads
+
+#         self.value_proj = nn.Linear(hidden_dim, hidden_dim)
+#         self.deform_attn = MSDeformableAttention(
+#             embed_dim=hidden_dim, num_heads=num_heads,
+#             num_levels=1, num_points=num_points, method='default',
+#         )
+#         # self.norm_q    = RMSNorm(hidden_dim)
+#         # self.norm_attn = RMSNorm(hidden_dim)
+#         self.norm_q    = nn.LayerNorm(hidden_dim)
+#         self.norm_attn = nn.LayerNorm(hidden_dim)
+
+#         self.fuse = nn.Sequential(
+#             nn.Linear(hidden_dim * 2, hidden_dim),
+#             nn.SiLU(inplace=True),
+#             nn.Linear(hidden_dim, reid_dim),
+#         )
+        
+#         # BẮT BUỘC: LayerNorm Bottleneck giúp ArcFace hội tụ. 
+#         # elementwise_affine=False để không làm lệch phân phối vector trên mặt cầu.
+#         self.bottleneck = nn.LayerNorm(reid_dim, elementwise_affine=False)
+
+#     def _build_value(self, feat: torch.Tensor):
+#         B, C, H, W = feat.shape
+#         v = feat.flatten(2).permute(0, 2, 1)          
+#         v = self.value_proj(v)                        
+#         head_dim = C // self.num_heads
+#         v = v.reshape(B, H * W, self.num_heads, head_dim)
+#         v = v.permute(0, 2, 3, 1).contiguous()        
+#         return [v], [[H, W]]
+
+#     def forward(self, det_hs, pred_boxes, feat, **kwargs) -> torch.Tensor:
+#         # det_hs: [B, N, C] - Đã được detach() từ Forward
+#         # pred_boxes: [B, N, 4] - Đã được detach() từ Forward
+#         # feat: [B, C, H, W] - KHÔNG detach để Encoder học ReID
+
+#         value_list, spatial_shapes = self._build_value(feat)
+#         q   = self.norm_q(det_hs)
+#         ref = pred_boxes.unsqueeze(2) # [B, N, 1, 4]
+
+#         # Lấy mẫu đặc trưng ngoại quan dựa trên tọa độ box dự đoán
+#         appearance = self.deform_attn(q, ref, value_list, spatial_shapes) 
+#         appearance = self.norm_attn(appearance)
+
+#         fused = torch.cat([det_hs, appearance], dim=-1)
+#         emb = self.fuse(fused)
+        
+#         return self.bottleneck(emb) # Trả về vector đã chuẩn hóa
+
+
+
 class TransformerReIDHead(nn.Module):
     """
-    Appearance-aware ReID head: Lấy mẫu đặc trưng thực tế từ Feature Map quanh box.
+    Appearance-aware ReID head: Lấy mẫu đặc trưng thực tế từ Feature Map quanh box (Đã tối ưu cho num_levels=1).
     """
     def __init__(self, hidden_dim: int, reid_dim: int,
                  num_heads: int = 8, num_points: int = 8):
@@ -55,8 +115,6 @@ class TransformerReIDHead(nn.Module):
             embed_dim=hidden_dim, num_heads=num_heads,
             num_levels=1, num_points=num_points, method='default',
         )
-        # self.norm_q    = RMSNorm(hidden_dim)
-        # self.norm_attn = RMSNorm(hidden_dim)
         self.norm_q    = nn.LayerNorm(hidden_dim)
         self.norm_attn = nn.LayerNorm(hidden_dim)
 
@@ -66,8 +124,7 @@ class TransformerReIDHead(nn.Module):
             nn.Linear(hidden_dim, reid_dim),
         )
         
-        # BẮT BUỘC: LayerNorm Bottleneck giúp ArcFace hội tụ. 
-        # elementwise_affine=False để không làm lệch phân phối vector trên mặt cầu.
+        # Bottleneck giữ nguyên cấu trúc không có tham số affine để bảo toàn phân phối mặt cầu ArcFace
         self.bottleneck = nn.LayerNorm(reid_dim, elementwise_affine=False)
 
     def _build_value(self, feat: torch.Tensor):
@@ -80,23 +137,23 @@ class TransformerReIDHead(nn.Module):
         return [v], [[H, W]]
 
     def forward(self, det_hs, pred_boxes, feat, **kwargs) -> torch.Tensor:
-        # det_hs: [B, N, C] - Đã được detach() từ Forward
-        # pred_boxes: [B, N, 4] - Đã được detach() từ Forward
-        # feat: [B, C, H, W] - KHÔNG detach để Encoder học ReID
+        # det_hs: [B, N, C]
+        # pred_boxes: [B, N, 4]
+        # feat: [B, C, H, W]
 
         value_list, spatial_shapes = self._build_value(feat)
         q   = self.norm_q(det_hs)
-        ref = pred_boxes.unsqueeze(2) # [B, N, 1, 4]
+        ref = pred_boxes.unsqueeze(2) # Định dạng chuẩn [B, N, 1, 4] khớp với num_levels=1
 
-        # Lấy mẫu đặc trưng ngoại quan dựa trên tọa độ box dự đoán
+        # Trích xuất đặc trưng ngoại quan cục bộ từ tầng tính năng đơn scale (reid_feat)
         appearance = self.deform_attn(q, ref, value_list, spatial_shapes) 
         appearance = self.norm_attn(appearance)
 
-        fused = torch.cat([det_hs, appearance], dim=-1)
+        # CẢI TIẾN: Thay det_hs bằng q (đã qua LayerNorm) để hai nhánh đồng bộ biên độ tính toán
+        fused = torch.cat([q, appearance], dim=-1)
         emb = self.fuse(fused)
         
-        return self.bottleneck(emb) # Trả về vector đã chuẩn hóa
-
+        return self.bottleneck(emb)
 
 class ContextAwareReIDHead(nn.Module):
     """
