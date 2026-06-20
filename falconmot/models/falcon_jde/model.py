@@ -267,7 +267,7 @@ class FalconJDEModel(nn.Module):
             # boxes_det = pred_boxes.detach()
             reid_feat = grad_scale(reid_feat, self.reid_grad_scale)
 
-            reid_out = self.reid_head(hs_det, boxes_det, reid_feat)
+            reid_out = self.reid_head(hs, pred_boxes, reid_feat)
             out['pred_reid']     = reid_out['emb']      # post-neck → CE + eval
             out['pred_reid_raw'] = reid_out['emb_raw']  # pre-neck  → triplet
         elif 'eval_hs' in out:
