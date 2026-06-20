@@ -161,7 +161,7 @@ class FeatFusion(nn.Module):
     def forward(self, c1: torch.Tensor, s8: torch.Tensor) -> torch.Tensor:
         # 1. Trích xuất đặc trưng hình học và ngữ nghĩa về cùng số kênh `mid`
         d = self.detail(c1)                                       # [B, mid, H4, W4]
-        s = self.sem(s8.detach())                                          # [B, mid, H8, W8]
+        s = self.sem(s8)                                          # [B, mid, H8, W8]
         
         # 2. Nội suy S8 lên cùng độ phân giải với C1
         s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False) # [B, mid, H4, W4]
