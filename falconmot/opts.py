@@ -90,12 +90,17 @@ class opts(object):
                                       'tập train. Offset image_id/seq_id/track_id để không '
                                       'va chạm. Lưu ý: không còn val tách biệt để đánh giá.')
         # ── ReID head ────────────────────────────────────────────────────
+        # NOTE: reid_head_type is DEPRECATED. The model now uses a single
+        # appearance ReID head (deformable-sample of the shared feature map).
+        # The flag is kept only so older scripts don't break; it is ignored.
         self.parser.add_argument('--reid_head_type', default='transformer',
                                  choices=['transformer', 'context_aware', 'mlp'],
-                                 help="ReID head: 'transformer' (deformable-sample feature "
-                                      "mịn quanh box, appearance-aware) hoặc 'mlp' (baseline).")
-        self.parser.add_argument('--reid_num_points', type=int, default=4,
-                                 help='số điểm deformable-sample/box cho TransformerReIDHead')
+                                 help='DEPRECATED / ignored — a single ReID head is always used.')
+        self.parser.add_argument('--reid_num_points', type=int, default=8,
+                                 help='số điểm deformable-sample/box cho ReID head')
+        self.parser.add_argument('--reid_grad_scale', type=float, default=1.0,
+                                 help='độ mạnh gradient ReID chảy vào trunk qua feature map '
+                                      '(1.0 = full JDE coupling; hạ về ~0.1 nếu detection bị nhiễu).')
 
         # Pretrained / spatial size
         self.parser.add_argument('--deim_pretrained', default='',
@@ -184,8 +189,9 @@ class opts(object):
         self.parser.add_argument('--rep', action='store_true', default=False,
                                  help='enable RepulsionLoss')
         self.parser.add_argument('--rep_weight', type=float, default=0.5)
-        self.parser.add_argument('--no_arcface', action='store_true', default=False,
-                                 help='use plain CE+Triplet instead of ArcFace for ReID')
+        self.parser.add_argument('--use_arcface', action='store_true', default=False,
+                                 help='use ArcFace for ReID classification. Default OFF = plain '
+                                      'CE + emb_scale (the stable FairMOT/AMOT recipe).')
 
         # ── Sequence-aware augmentation ────────────────────────────────────
         self.parser.add_argument('--temporal_mosaic', action='store_true', default=False,

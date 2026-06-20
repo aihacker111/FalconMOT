@@ -158,6 +158,22 @@ class FalconJDECriterion(nn.Module):
             self.ce_loss = nn.CrossEntropyLoss(ignore_index=-1)
             self.triplet = TripletLoss(margin=0.3)
 
+            # Per-class embedding scale (FairMOT / AMOT recipe). Sharpens the
+            # softmax temperature according to the number of identities in the
+            # class, so plain CE stays well-conditioned across classes whose
+            # nID differ by orders of magnitude.
+            self.emb_scale_dict = {
+                cls_id: math.sqrt(2) * math.log(max(nid - 1, 2))
+                for cls_id, nid in nid_dict.items()
+            }
+
+        # Learnable homoscedastic-uncertainty weights (Kendall et al.) that
+        # balance detection vs ReID automatically — this, not a hard
+        # stop-gradient, is what keeps the two objectives from conflicting.
+        # Initialised so detection dominates early: exp(1.85) > exp(1.05).
+        self.s_det = nn.Parameter(torch.tensor(-1.85))
+        self.s_id  = nn.Parameter(torch.tensor(-1.05))
+
     # ------------------------------------------------------------------
     # Dense heatmap loss (CenterNet-style, on S4 feature map)
     # ------------------------------------------------------------------
@@ -237,127 +253,82 @@ class FalconJDECriterion(nn.Module):
     # ReID loss
     # ------------------------------------------------------------------
 
-    # def loss_reid(self, outputs, targets, indices) -> dict:
-    #     if 'pred_reid' not in outputs:
-    #         return {}
-
-    #     pred_reid = outputs['pred_reid']   # (B, N_det, D)
-    #     dev = pred_reid.device
-    #     reid_loss = pred_reid.sum() * 0.0
-
-    #     cls_emb = {cid: [] for cid in self.nid_dict}
-    #     cls_ids = {cid: [] for cid in self.nid_dict}
-
-    #     for b_idx, (src_idx, tgt_idx) in enumerate(indices):
-    #         if len(src_idx) == 0:
-    #             continue
-    #         t      = targets[b_idx]
-    #         labels = t['labels'].to(dev)[tgt_idx.to(dev)]
-    #         tids   = t['track_ids'].to(dev)[tgt_idx.to(dev)]
-    #         valid  = tids >= 0
-    #         if not valid.any():
-    #             continue
-    #         emb_all = pred_reid[b_idx][src_idx.to(dev)[valid]]
-    #         lbl_all = labels[valid]
-    #         ids_all = tids[valid]
-
-    #         for cls_id in self.nid_dict:
-    #             mask = (lbl_all == cls_id)
-    #             if not mask.any():
-    #                 continue
-    #             cls_emb[cls_id].append(emb_all[mask])
-    #             cls_ids[cls_id].append(ids_all[mask])
-
-    #     n_active = 0
-    #     for cls_id in self.nid_dict:
-    #         if not cls_emb[cls_id]:
-    #             continue
-    #         emb_cat = torch.cat(cls_emb[cls_id], dim=0)
-    #         ids_cat = torch.cat(cls_ids[cls_id], dim=0)
-    #         if self.use_arcface:
-    #             pred = self.classifiers[str(cls_id)](emb_cat, ids_cat)
-    #         else:
-    #             pred = self.linear_classifiers[str(cls_id)](emb_cat)
-    #         reid_loss = reid_loss + self.ce_loss(pred, ids_cat)
-    #         if self.use_triplet and emb_cat.shape[0] >= 2:
-    #             reid_loss = reid_loss + self.triplet(F.normalize(emb_cat, dim=-1), ids_cat)
-    #         n_active += 1
-
-    #     if n_active > 1:
-    #         reid_loss = reid_loss / n_active
-    #     return {'loss_reid': reid_loss}
     def loss_reid(self, outputs, targets, indices) -> dict:
-        # Kiểm tra xem Model có hỗ trợ luồng kép (emb_norm và emb_raw) từ Head Decouple hay không
-        has_dual_stream = 'pred_reid' in outputs and 'pred_reid_raw' in outputs
-        if not has_dual_stream and 'pred_reid' not in outputs:
+        """Per-class ReID loss on the queries matched to ground-truth objects.
+
+        Two representations come from the head (BNNeck principle):
+          • ``pred_reid``     — post-neck embedding → CE / ArcFace + inference
+          • ``pred_reid_raw`` — pre-neck embedding  → TripletLoss
+
+        For the (recommended) plain-CE path we follow FairMOT / AMOT exactly:
+        scale * L2-normalize the embedding, then a per-class linear classifier.
+        Inference L2-normalizes the *same* post-neck vector, so the direction
+        CE optimises is the direction the tracker matches on (cosine).
+        """
+        if 'pred_reid' not in outputs:
             return {}
 
-        pred_reid_norm = outputs['pred_reid'] # Luồng đã chuẩn hóa (emb_norm)
-        dev = pred_reid_norm.device
-        reid_loss = pred_reid_norm.sum() * 0.0
+        pred_reid = outputs['pred_reid']                          # (B, N, D) post-neck
+        pred_reid_raw = outputs.get('pred_reid_raw', pred_reid)   # (B, N, D) pre-neck
+        dev = pred_reid.device
+        reid_loss = pred_reid.sum() * 0.0
 
-        cls_emb_norm = {cid: [] for cid in self.nid_dict}
-        cls_emb_raw  = {cid: [] for cid in self.nid_dict}
-        cls_ids      = {cid: [] for cid in self.nid_dict}
+        # Gather matched embeddings per ReID class.
+        cls_emb     = {cid: [] for cid in self.nid_dict}   # post-neck (CE)
+        cls_emb_raw = {cid: [] for cid in self.nid_dict}   # pre-neck  (triplet)
+        cls_ids     = {cid: [] for cid in self.nid_dict}
 
         for b_idx, (src_idx, tgt_idx) in enumerate(indices):
             if len(src_idx) == 0:
                 continue
-            t      = targets[b_idx]
-            labels = t['labels'].to(dev)[tgt_idx.to(dev)]
-            tids   = t['track_ids'].to(dev)[tgt_idx.to(dev)]
-            valid  = tids >= 0
+            t       = targets[b_idx]
+            src_idx = src_idx.to(dev)
+            tgt_idx = tgt_idx.to(dev)
+            labels  = t['labels'].to(dev)[tgt_idx]
+            tids    = t['track_ids'].to(dev)[tgt_idx]
+            valid   = tids >= 0
             if not valid.any():
                 continue
-            
-            src_idx_gpu = src_idx.to(dev)[valid]
-            emb_norm_all = pred_reid_norm[b_idx][src_idx_gpu]
-            lbl_all = labels[valid]
-            ids_all = tids[valid]
-            
-            # Nếu có luồng thô (emb_raw), trích xuất song song
-            if has_dual_stream:
-                emb_raw_all = outputs['pred_reid_raw'][b_idx][src_idx_gpu]
+
+            src_v   = src_idx[valid]
+            emb_b   = pred_reid[b_idx][src_v]
+            emb_b_r = pred_reid_raw[b_idx][src_v]
+            lbl_b   = labels[valid]
+            ids_b   = tids[valid]
 
             for cls_id in self.nid_dict:
-                mask = (lbl_all == cls_id)
+                mask = (lbl_b == cls_id)
                 if not mask.any():
                     continue
-                cls_emb_norm[cls_id].append(emb_norm_all[mask])
-                if has_dual_stream:
-                    cls_emb_raw[cls_id].append(emb_raw_all[mask])
-                cls_ids[cls_id].append(ids_all[mask])
+                cls_emb[cls_id].append(emb_b[mask])
+                cls_emb_raw[cls_id].append(emb_b_r[mask])
+                cls_ids[cls_id].append(ids_b[mask])
 
         n_active = 0
         for cls_id in self.nid_dict:
-            if not cls_emb_norm[cls_id]:
+            if not cls_emb[cls_id]:
                 continue
-            emb_norm_cat = torch.cat(cls_emb_norm[cls_id], dim=0)
-            ids_cat      = torch.cat(cls_ids[cls_id], dim=0)
+            emb     = torch.cat(cls_emb[cls_id], dim=0)        # (n, D) post-neck
+            emb_raw = torch.cat(cls_emb_raw[cls_id], dim=0)    # (n, D) pre-neck
+            ids     = torch.cat(cls_ids[cls_id], dim=0)        # (n,)
 
-            # 1. Tính toán CE Loss / ArcFace (Dùng luồng ĐÃ chuẩn hóa)
+            # ---- classification (ID) loss ----
             if self.use_arcface:
-                pred = self.classifiers[str(cls_id)](emb_norm_cat, ids_cat)
+                logits = self.classifiers[str(cls_id)](emb, ids)   # ArcFace normalizes internally
             else:
-                pred = self.linear_classifiers[str(cls_id)](emb_norm_cat)
-            reid_loss = reid_loss + self.ce_loss(pred, ids_cat)
+                emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
+                logits = self.linear_classifiers[str(cls_id)](emb_id)
+            reid_loss = reid_loss + self.ce_loss(logits, ids)
 
-            # 2. Tính toán Triplet Loss (Dùng luồng CHƯA chuẩn hóa, loại bỏ hoàn toàn F.normalize)
-            if self.use_triplet and emb_norm_cat.shape[0] >= 2:
-                if has_dual_stream:
-                    emb_triplet_cat = torch.cat(cls_emb_raw[cls_id], dim=0)
-                else:
-                    emb_triplet_cat = emb_norm_cat # Tự động fallback nếu dùng head cũ
-                
-                # KHÔNG dùng L2 Normalize để giải phóng không gian Euclid tự do cho Triplet
-                reid_loss = reid_loss + self.triplet(emb_triplet_cat, ids_cat)
-            
+            # ---- optional metric (triplet) loss on the un-normalized vector ----
+            if self.use_triplet and emb_raw.shape[0] >= 2:
+                reid_loss = reid_loss + self.triplet(emb_raw, ids)
+
             n_active += 1
 
         if n_active > 1:
             reid_loss = reid_loss / n_active
         return {'loss_reid': reid_loss}
-
 
     # def loss_s4_aux(self, outputs, targets, indices, num_boxes):
     #     """
@@ -584,8 +555,27 @@ class FalconJDECriterion(nn.Module):
 
         losses = {k: torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
 
-        # Aggregate main-output losses for logging
-        _det_keys = {'loss_cls', 'loss_bbox', 'loss_giou', 'loss_s4_aux'}
-        losses['loss_det'] = sum(losses[k] for k in _det_keys if k in losses)
-        losses['loss']     = sum(v for k, v in losses.items() if k not in ('loss_det', 'loss'))
+        # ------------------------------------------------------------------
+        # Total loss — learnable uncertainty weighting (Kendall et al.).
+        # det_loss aggregates EVERY detection term (main + aux + dn + enc + s4)
+        # so the auxiliary supervision is preserved; only ReID is weighted
+        # separately. The (s_det + s_id) term is the regulariser that stops the
+        # weights collapsing to zero.
+        # ------------------------------------------------------------------
+        reid_loss = losses.get('loss_reid', None)
+        det_loss  = sum(v for k, v in losses.items() if k != 'loss_reid')
+
+        if self.use_reid and self.id_weight > 0 and reid_loss is not None:
+            total = (torch.exp(-self.s_det) * det_loss
+                     + torch.exp(-self.s_id) * reid_loss
+                     + (self.s_det + self.s_id))
+        else:
+            total = torch.exp(-self.s_det) * det_loss + self.s_det
+        total = total * 0.5
+
+        # Detached scalars for logging only.
+        losses['loss_det'] = det_loss.detach()
+        losses['s_det']    = self.s_det.detach()
+        losses['s_id']     = self.s_id.detach()
+        losses['loss']     = total
         return losses

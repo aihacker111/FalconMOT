@@ -60,7 +60,10 @@ def _build_criterion(opt) -> FalconJDECriterion:
         use_reid            = getattr(opt, 'use_reid', True),
         id_weight           = getattr(opt, 'id_weight', 1.0),
         use_triplet         = getattr(opt, 'tri', False),
-        use_arcface         = not getattr(opt, 'no_arcface', False),
+        # Plain CE + emb_scale is the stable FairMOT/AMOT recipe and the default.
+        # ArcFace is opt-in (set --use_arcface) — it tends to overfit a low-capacity
+        # head, which is exactly what degraded ReID over epochs previously.
+        use_arcface         = getattr(opt, 'use_arcface', False),
     )
 
 
@@ -97,9 +100,9 @@ class MotTrainer(BaseTrainer):
         super().__init__(opt, model, optimizer=optimizer, **kwargs)
 
     def _get_losses(self, opt):
-        loss_states = ['loss_det']
+        loss_states = ['loss', 'loss_det']
         if getattr(opt, 'use_reid', True) and getattr(opt, 'id_weight', 1.0) > 0:
-            loss_states.append('loss_reid')
+            loss_states += ['loss_reid', 's_det', 's_id']
         loss_states += ['loss_cls', 'loss_bbox', 'loss_giou']
         if getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True):
             loss_states.append('loss_s4_aux')
