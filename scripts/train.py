@@ -57,7 +57,7 @@ def build_optimizer(model, opt):
     backbone.sta.stem.1.weight) are correctly assigned weight_decay=0.
     """
     base_lr      = opt.lr
-    backbone_lr  = base_lr * 0.05
+    backbone_lr  = base_lr * getattr(opt, 'backbone_lr_factor', 0.05)
     weight_decay = opt.weight_decay
 
     # Collect FQNs of all params that belong to a normalization module.

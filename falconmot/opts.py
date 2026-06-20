@@ -130,6 +130,9 @@ class opts(object):
         # ── Training ───────────────────────────────────────────────────────
         self.parser.add_argument('--lr', type=float, default=5e-4)
         self.parser.add_argument('--weight_decay', type=float, default=1e-4)
+        self.parser.add_argument('--backbone_lr_factor', type=float, default=0.05,
+                                 help='backbone LR = lr × this factor (pretrained DINOv3 fine-tune; '
+                                      '0.05 conservative, 0.1 = DETR/D-FINE default).')
         self.parser.add_argument('--lr_step', type=str, default='10,20',
                                  help='epochs to drop LR (step scheduler)')
         self.parser.add_argument('--warmup_iters', type=int, default=2000,
