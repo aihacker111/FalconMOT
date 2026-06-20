@@ -263,6 +263,32 @@ class opts(object):
         self.parser.add_argument('--conf_thres', type=float, default=0.4,
                                  help='detection confidence threshold')
         self.parser.add_argument('--track_buffer', type=int, default=30)
+        # ── Query Appearance-Motion (QAM) association ──
+        self.parser.add_argument('--use_appearance_motion', action='store_true',
+                                 help='enable appearance-as-motion association: predict each '
+                                      'track position by cross-frame correlation on the dense '
+                                      'reid map (soft-argmax), entropy-gated, fused by '
+                                      'log-likelihood. Falls back to legacy fusion if off.')
+        self.parser.add_argument('--legacy_fuse', action='store_true',
+                                 help='force the old multiplicative fuse_score_three (A/B).')
+        self.parser.add_argument('--am_tau', type=float, default=0.07,
+                                 help='softmax temperature for the correlation response.')
+        self.parser.add_argument('--am_kappa', type=float, default=0.1,
+                                 help='motion sigma = kappa * sqrt(w*h); smaller = stricter.')
+        self.parser.add_argument('--am_beta', type=float, default=4.0,
+                                 help='entropy->confidence sharpness: w = exp(-beta*entropy).')
+        self.parser.add_argument('--am_w_app', type=float, default=1.0,
+                                 help='appearance (cosine) cue weight in log-lik fusion.')
+        self.parser.add_argument('--am_w_iou', type=float, default=1.0,
+                                 help='IoU cue weight in log-lik fusion.')
+        self.parser.add_argument('--match_thresh', type=float, default=0.7,
+                                 help='cost ceiling for the first (QAM) association.')
+        self.parser.add_argument('--proximity_thresh', type=float, default=0.95,
+                                 help='IoU-distance spatial gate: a pair with iou_dist above '
+                                      'this needs motion to vouch for it.')
+        self.parser.add_argument('--motion_gate', type=float, default=0.9,
+                                 help='motion-distance spatial gate: motion can vouch for a '
+                                      'low-IoU pair only if its motion_dist is below this.')
         # ── Tracking-metric validation (chọn model_best theo IDF1/MOTA) ──
         self.parser.add_argument('--emb_weight', type=float, default=1.0,
                                  help='ReID weight in association fusion. '
