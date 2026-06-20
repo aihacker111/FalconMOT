@@ -133,6 +133,11 @@ class opts(object):
         self.parser.add_argument('--backbone_lr_factor', type=float, default=0.05,
                                  help='backbone LR = lr × this factor (pretrained DINOv3 fine-tune; '
                                       '0.05 conservative, 0.1 = DETR/D-FINE default).')
+        self.parser.add_argument('--reid_lr_factor', type=float, default=1.0,
+                                 help='ReID branch LR = lr × this factor. reid_head + ID classifiers '
+                                      'are trained from scratch while the rest is pretrained, so a '
+                                      'higher factor (e.g. 3–5) speeds ReID convergence without '
+                                      'destabilising the detector. s_det/s_id stay at base LR.')
         self.parser.add_argument('--lr_step', type=str, default='10,20',
                                  help='epochs to drop LR (step scheduler)')
         self.parser.add_argument('--warmup_iters', type=int, default=2000,

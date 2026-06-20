@@ -33,15 +33,29 @@ class BaseTrainer(object):
         else:
             self.model_with_loss = ModleWithLoss(model, self.loss)
 
-        crit_params = [p for p in self.loss.parameters() if p.requires_grad]
-        if crit_params:
-            # ReID classifiers + uncertainty weights (s_det / s_id) must NOT be
-            # weight-decayed. s_det/s_id are log-variance scalars: decaying them
-            # toward 0 biases the task balance exp(-s) toward equal weighting and
-            # fights the learned detection/ReID trade-off. ReID classifier weights
-            # also train better without decay (matches FairMOT/AMOT, which use no
-            # WD on the ID head). They still run at the optimizer's base LR.
-            self.optimizer.add_param_group({'params': crit_params, 'weight_decay': 0.0})
+        # Criterion params live outside the model, so add them here. Split them:
+        #   • ID classifiers (reid_head's partner) → same reid LR as the model's
+        #     reid_head, since both are trained from scratch.
+        #   • s_det / s_id uncertainty weights      → base LR (a high LR would
+        #     make the task-balance jumpy).
+        # Both groups use weight_decay=0: s_det/s_id are log-variance scalars
+        # (decay biases the balance toward equal weighting) and ReID classifier
+        # weights train better without decay (matches FairMOT/AMOT).
+        reid_lr = self.opt.lr * getattr(self.opt, 'reid_lr_factor', 1.0)
+        cls_params, s_params = [], []
+        for p_name, p in self.loss.named_parameters():
+            if not p.requires_grad:
+                continue
+            if p_name in ('s_det', 's_id'):
+                s_params.append(p)
+            else:
+                cls_params.append(p)
+        if cls_params:
+            self.optimizer.add_param_group(
+                {'params': cls_params, 'lr': reid_lr, 'weight_decay': 0.0})
+        if s_params:
+            self.optimizer.add_param_group(
+                {'params': s_params, 'weight_decay': 0.0})
 
     def set_device(self, gpus, chunk_sizes, device):
         dev_ids = [i for i in range(len(gpus))]

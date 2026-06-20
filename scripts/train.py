@@ -46,11 +46,18 @@ def _with_lr(opt, lr):
 
 def build_optimizer(model, opt):
     """
-    AdamW with 4 param groups:
-      - backbone non-norm : lr * 0.05, weight_decay = default
-      - backbone norm/bias: lr * 0.05, weight_decay = 0
-      - other   norm/bias : lr,        weight_decay = 0
-      - everything else   : lr,        weight_decay = default
+    AdamW with up to 6 param groups:
+      - backbone non-norm : lr * backbone_lr_factor, weight_decay = default
+      - backbone norm/bias: lr * backbone_lr_factor, weight_decay = 0
+      - reid_head non-norm: lr * reid_lr_factor,      weight_decay = default
+      - reid_head norm/bias: lr * reid_lr_factor,     weight_decay = 0
+      - other   norm/bias : lr,                       weight_decay = 0
+      - everything else   : lr,                       weight_decay = default
+
+    reid_head is trained from scratch while backbone/encoder/decoder are
+    pretrained, so it gets its own LR (reid_lr_factor, default 1.0 = no change).
+    The ReID ID classifiers live in the criterion and are given the same reid LR
+    inside base_trainer; s_det/s_id stay at base LR.
 
     Norm layers are detected by module type (not just param name) so that
     BN gamma params inside anonymous nn.Sequential blocks (e.g.
@@ -58,6 +65,7 @@ def build_optimizer(model, opt):
     """
     base_lr      = opt.lr
     backbone_lr  = base_lr * getattr(opt, 'backbone_lr_factor', 0.05)
+    reid_lr      = base_lr * getattr(opt, 'reid_lr_factor', 1.0)
     weight_decay = opt.weight_decay
 
     # Collect FQNs of all params that belong to a normalization module.
@@ -67,16 +75,23 @@ def build_optimizer(model, opt):
             for p_name, _ in module.named_parameters(recurse=False):
                 norm_param_names.add(f'{mod_name}.{p_name}')
 
-    backbone_wd, backbone_no_wd, other_no_wd, default = [], [], [], []
+    backbone_wd, backbone_no_wd = [], []
+    reid_wd, reid_no_wd         = [], []
+    other_no_wd, default        = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         is_backbone = 'backbone' in name
+        is_reid     = 'reid_head' in name
         is_no_wd    = name in norm_param_names or name.endswith('.bias')
         if is_backbone and is_no_wd:
             backbone_no_wd.append(param)
         elif is_backbone:
             backbone_wd.append(param)
+        elif is_reid and is_no_wd:
+            reid_no_wd.append(param)
+        elif is_reid:
+            reid_wd.append(param)
         elif is_no_wd:
             other_no_wd.append(param)
         else:
@@ -86,7 +101,9 @@ def build_optimizer(model, opt):
         pg for pg in [
             {'params': backbone_wd,    'lr': backbone_lr},
             {'params': backbone_no_wd, 'lr': backbone_lr, 'weight_decay': 0.},
-            {'params': other_no_wd,                        'weight_decay': 0.},
+            {'params': reid_wd,        'lr': reid_lr},
+            {'params': reid_no_wd,     'lr': reid_lr,     'weight_decay': 0.},
+            {'params': other_no_wd,                       'weight_decay': 0.},
             {'params': default},
         ]
         if pg['params']
