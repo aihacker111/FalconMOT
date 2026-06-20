@@ -35,7 +35,13 @@ class BaseTrainer(object):
 
         crit_params = [p for p in self.loss.parameters() if p.requires_grad]
         if crit_params:
-            self.optimizer.add_param_group({'params': crit_params})
+            # ReID classifiers + uncertainty weights (s_det / s_id) must NOT be
+            # weight-decayed. s_det/s_id are log-variance scalars: decaying them
+            # toward 0 biases the task balance exp(-s) toward equal weighting and
+            # fights the learned detection/ReID trade-off. ReID classifier weights
+            # also train better without decay (matches FairMOT/AMOT, which use no
+            # WD on the ID head). They still run at the optimizer's base LR.
+            self.optimizer.add_param_group({'params': crit_params, 'weight_decay': 0.0})
 
     def set_device(self, gpus, chunk_sizes, device):
         dev_ids = [i for i in range(len(gpus))]
