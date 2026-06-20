@@ -263,8 +263,8 @@ class FalconJDEModel(nn.Module):
             #     appearance gradient flows into the encoder / backbone so the
             #     shared trunk learns identity features. Detection vs ReID are
             #     balanced by uncertainty weights in the criterion, not here.
-            hs_det    = hs.detach()
-            boxes_det = pred_boxes.detach()
+            # hs_det    = hs.detach()
+            # boxes_det = pred_boxes.detach()
             reid_feat = grad_scale(reid_feat, self.reid_grad_scale)
 
             reid_out = self.reid_head(hs_det, boxes_det, reid_feat)
