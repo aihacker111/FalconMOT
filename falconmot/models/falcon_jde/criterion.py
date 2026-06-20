@@ -119,6 +119,8 @@ class FalconJDECriterion(nn.Module):
         id_weight:           float = 1.0,
         use_triplet:         bool  = False,
         use_arcface:         bool  = True,
+        s_det_init:          float = 2.5,
+        s_id_init:           float = 1.85,
     ):
         super().__init__()
         self.matcher             = matcher
@@ -168,11 +170,13 @@ class FalconJDECriterion(nn.Module):
             }
 
         # Learnable homoscedastic-uncertainty weights (Kendall et al.) that
-        # balance detection vs ReID automatically — this, not a hard
-        # stop-gradient, is what keeps the two objectives from conflicting.
-        # Initialised so detection dominates early: exp(1.85) > exp(1.05).
-        self.s_det = nn.Parameter(torch.tensor(-1.85))
-        self.s_id  = nn.Parameter(torch.tensor(-1.05))
+        # balance detection vs ReID automatically. Init should be ≈ log of the
+        # initial raw loss magnitudes (s* = log L), so each weighted loss
+        # exp(-s)·L starts near 1. Defaults are tuned for this DETR-JDE loss
+        # scale (L_det≈12, L_reid≈6); FairMOT's −1.85/−1.05 assume L<1 and are
+        # wrong here — they leave s too far from the optimum to ever reach it.
+        self.s_det = nn.Parameter(torch.tensor(float(s_det_init)))
+        self.s_id  = nn.Parameter(torch.tensor(float(s_id_init)))
 
     # ------------------------------------------------------------------
     # Dense heatmap loss (CenterNet-style, on S4 feature map)

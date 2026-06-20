@@ -64,6 +64,10 @@ def _build_criterion(opt) -> FalconJDECriterion:
         # ArcFace is opt-in (set --use_arcface) — it tends to overfit a low-capacity
         # head, which is exactly what degraded ReID over epochs previously.
         use_arcface         = getattr(opt, 'use_arcface', False),
+        # s init ≈ log(initial loss_det) and log(initial loss_reid). Read the
+        # first-iteration loss_det / loss_reid from the log and set these.
+        s_det_init          = getattr(opt, 's_det_init', 2.5),
+        s_id_init           = getattr(opt, 's_id_init', 1.85),
     )
 
 

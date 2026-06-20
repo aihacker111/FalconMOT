@@ -195,6 +195,11 @@ class opts(object):
         self.parser.add_argument('--use_arcface', action='store_true', default=False,
                                  help='use ArcFace for ReID classification. Default OFF = plain '
                                       'CE + emb_scale (the stable FairMOT/AMOT recipe).')
+        self.parser.add_argument('--s_det_init', type=float, default=2.5,
+                                 help='init for uncertainty weight s_det ≈ log(initial loss_det). '
+                                      'Read first-iter loss_det from the log and set log() of it.')
+        self.parser.add_argument('--s_id_init', type=float, default=1.85,
+                                 help='init for uncertainty weight s_id ≈ log(initial loss_reid).')
 
         # ── Sequence-aware augmentation ────────────────────────────────────
         self.parser.add_argument('--temporal_mosaic', action='store_true', default=False,
