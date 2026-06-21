@@ -190,7 +190,7 @@ class opts(object):
                                  help='root for tracking eval data (track.py)')
 
         # ── Loss ───────────────────────────────────────────────────────────
-        self.parser.add_argument('--id_weight', type=float, default=1.0,
+        self.parser.add_argument('--id_weight', type=float, default=0.0,
                                  help='ReID loss weight (0 = detection only)')
         self.parser.add_argument('--tri', action='store_true',
                                  help='add triplet loss to ReID')
