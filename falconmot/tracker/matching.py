@@ -72,7 +72,11 @@
 
 
 # def fuse_score_three(iou_cost_matrix, id_sim_matrix, detections):
-#     """Fuse IoU and ReID similarities multiplicatively into a single cost."""
+#     """LEGACY multiplicative fusion: cost = 1 - (iou_sim * reid_sim).
+
+#     Kept for A/B comparison. Gates ReID by IoU multiplicatively, so a strong
+#     appearance match cannot rescue a low-IoU pair. Prefer `fuse_loglik`.
+#     """
 #     if iou_cost_matrix.size == 0:
 #         return iou_cost_matrix
 #     iou_sim = 1.0 - iou_cost_matrix
@@ -80,9 +84,77 @@
 #     return 1.0 - (iou_sim * id_sim)
 
 
+# # ───────────────────── Query Appearance-Motion fusion ─────────────────────
+
+# def motion_distance(pred_xy, det_xy, track_sizes, kappa=0.1):
+#     """Size-adaptive Gaussian distance between predicted and detected centres.
+
+#         D^m_ij = 1 - exp( -||c_j - ĉ_i||^2 / (2 (κ·sqrt(w_i h_i))^2) )
+
+#     Args:
+#         pred_xy     : (T, 2) appearance-predicted track centres (orig coords).
+#         det_xy      : (D, 2) detection centres (orig coords).
+#         track_sizes : (T,) sqrt(w·h) of each track (orig pixels) — sets σ.
+#         kappa       : σ = κ · object-size; smaller = stricter.
+#     Returns:
+#         (T, D) motion distance in [0, 1].
+#     """
+#     T, D = len(pred_xy), len(det_xy)
+#     if T == 0 or D == 0:
+#         return np.zeros((T, D), dtype=np.float32)
+#     pred_xy = np.asarray(pred_xy, dtype=np.float32)
+#     det_xy  = np.asarray(det_xy,  dtype=np.float32)
+#     d2 = ((pred_xy[:, None, :] - det_xy[None, :, :]) ** 2).sum(axis=2)   # (T, D)
+#     sigma = np.maximum(kappa * np.asarray(track_sizes, np.float32), 1.0)[:, None]
+#     return (1.0 - np.exp(-d2 / (2.0 * sigma ** 2))).astype(np.float32)
 
 
+# def fuse_loglik(d_app, d_iou, d_mot=None, w_mot=None,
+#                 w_app=1.0, w_iou=1.0,
+#                 proximity_gate=0.95, motion_gate=0.9):
+#     """Probabilistic multi-cue fusion: a per-track weighted average of cue
+#     *distances* (= −log of a product of independent exponential likelihoods),
+#     instead of a product of similarities.
 
+#         cost_ij = ( w_a d^a_ij + w_g d^g_ij + w^m_i d^m_ij )
+#                   / ( w_a + w_g + w^m_i )
+
+#     A spatial gate blocks pairs that are implausible by BOTH geometry and
+#     motion (so appearance alone cannot match across the whole frame), while a
+#     strong IoU *or* a strong motion prediction is enough to vouch for a pair:
+
+#         keep_ij = (d^g_ij ≤ proximity_gate) OR (d^m_ij ≤ motion_gate)
+
+#     Args:
+#         d_app : (T, D) appearance (cosine) distance.
+#         d_iou : (T, D) 1 - IoU.
+#         d_mot : (T, D) motion distance, or None (appearance+IoU only).
+#         w_mot : (T,) per-track motion confidence (entropy-gated), or None.
+#         w_app, w_iou : scalar cue weights.
+#         proximity_gate, motion_gate : spatial gating thresholds.
+#     Returns:
+#         (T, D) fused cost in [0, 1] (gated entries set to a large value).
+#     """
+#     if d_app.size == 0:
+#         return d_app
+#     T, D = d_app.shape
+#     cost = w_app * d_app + w_iou * d_iou
+#     wtot = np.full((T, 1), float(w_app + w_iou), dtype=np.float32)
+
+#     use_motion = d_mot is not None and w_mot is not None and d_mot.size > 0
+#     if use_motion:
+#         wm = np.asarray(w_mot, dtype=np.float32)[:, None]    # (T, 1)
+#         cost = cost + wm * d_mot
+#         wtot = wtot + wm
+
+#     cost = cost / np.maximum(wtot, 1e-6)
+
+#     # spatial gate: IoU or motion must vouch for the pair
+#     spatial_ok = d_iou <= proximity_gate
+#     if use_motion:
+#         spatial_ok = spatial_ok | (d_mot <= motion_gate)
+#     cost = np.where(spatial_ok, cost, 1e4).astype(np.float32)
+#     return cost
 
 
 
@@ -213,16 +285,6 @@ def fuse_loglik(d_app, d_iou, d_mot=None, w_mot=None,
     strong IoU *or* a strong motion prediction is enough to vouch for a pair:
 
         keep_ij = (d^g_ij ≤ proximity_gate) OR (d^m_ij ≤ motion_gate)
-
-    Args:
-        d_app : (T, D) appearance (cosine) distance.
-        d_iou : (T, D) 1 - IoU.
-        d_mot : (T, D) motion distance, or None (appearance+IoU only).
-        w_mot : (T,) per-track motion confidence (entropy-gated), or None.
-        w_app, w_iou : scalar cue weights.
-        proximity_gate, motion_gate : spatial gating thresholds.
-    Returns:
-        (T, D) fused cost in [0, 1] (gated entries set to a large value).
     """
     if d_app.size == 0:
         return d_app
@@ -238,9 +300,74 @@ def fuse_loglik(d_app, d_iou, d_mot=None, w_mot=None,
 
     cost = cost / np.maximum(wtot, 1e-6)
 
-    # spatial gate: IoU or motion must vouch for the pair
     spatial_ok = d_iou <= proximity_gate
     if use_motion:
         spatial_ok = spatial_ok | (d_mot <= motion_gate)
     cost = np.where(spatial_ok, cost, 1e4).astype(np.float32)
+    return cost
+
+
+# ───────────────── Uncertainty-Aware Appearance-Motion (UAM) ─────────────────
+
+def inv_var_fuse(p_mean, p_cov, c_mean, c_cov):
+    """Inverse-variance (precision-weighted) fusion of two 2-D Gaussian position
+    estimates — the Bayesian-optimal combination of independent estimators.
+
+        P = (Σp⁻¹ + Σc⁻¹)⁻¹ ,   x = P (Σp⁻¹ μp + Σc⁻¹ μc)
+
+    Kalman supplies (μp, Σp); the appearance correlation supplies (μc, Σc) whose
+    Σc is the response spread, so a diffuse/occluded response (large Σc) is
+    automatically down-weighted and the estimate falls back to Kalman.
+
+    Args:
+        p_mean : (2,)   Kalman position mean.
+        p_cov  : (2,2)  Kalman position covariance.
+        c_mean : (2,)   correlation position mean (or None → Kalman only).
+        c_cov  : (2,2)  correlation covariance (or None).
+    Returns:
+        x : (2,) fused mean,  P : (2,2) fused covariance.
+    """
+    Pp = np.linalg.inv(p_cov + np.eye(2, dtype=p_cov.dtype) * 1e-6)
+    if c_mean is None or c_cov is None:
+        return np.asarray(p_mean, np.float32), np.linalg.inv(Pp).astype(np.float32)
+    Pc = np.linalg.inv(c_cov + np.eye(2, dtype=c_cov.dtype) * 1e-6)
+    P = np.linalg.inv(Pp + Pc)
+    x = P @ (Pp @ np.asarray(p_mean) + Pc @ np.asarray(c_mean))
+    return x.astype(np.float32), P.astype(np.float32)
+
+
+def maha_gate_cost(fused_means, fused_covs, det_xy, app_cost,
+                   chi2=9.21, cos_thresh=0.4):
+    """Cascade cost for UAM: Mahalanobis gate (motion) + cosine cost (appearance).
+
+    For every (track i, detection j):
+        d²_ij = (z_j − x̂_i)ᵀ P_i⁻¹ (z_j − x̂_i)          # motion plausibility
+        keep  = d²_ij ≤ chi2  AND  app_cost_ij ≤ cos_thresh
+        cost  = app_cost_ij if keep else ∞
+
+    Motion only *gates*; appearance *ranks* (DeepSORT-style). No motion sigma,
+    no cue weights — the gate is a chi-square constant and the only tunable is
+    the cosine ceiling.
+
+    Args:
+        fused_means : (T, 2)    fused predicted centres.
+        fused_covs  : (T, 2, 2) fused covariances.
+        det_xy      : (D, 2)    detection centres.
+        app_cost    : (T, D)    appearance (cosine) distance.
+        chi2        : Mahalanobis gate threshold (χ²₂ ≈ 5.99/9.21 at .95/.99).
+        cos_thresh  : max appearance distance for a valid match.
+    Returns:
+        (T, D) cost matrix (gated entries set large).
+    """
+    T, D = app_cost.shape
+    if T == 0 or D == 0:
+        return app_cost
+    det_xy = np.asarray(det_xy, np.float32)
+    cost = np.full((T, D), 1e4, dtype=np.float32)
+    for i in range(T):
+        Pinv = np.linalg.inv(fused_covs[i] + np.eye(2, dtype=np.float32) * 1e-6)
+        diff = det_xy - fused_means[i][None, :]            # (D, 2)
+        d2 = np.einsum('di,ij,dj->d', diff, Pinv, diff)    # (D,)
+        ok = (d2 <= chi2) & (app_cost[i] <= cos_thresh)
+        cost[i, ok] = app_cost[i, ok]
     return cost

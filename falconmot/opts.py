@@ -269,6 +269,13 @@ class opts(object):
                                       'track position by cross-frame correlation on the dense '
                                       'reid map (soft-argmax), entropy-gated, fused by '
                                       'log-likelihood. Falls back to legacy fusion if off.')
+        self.parser.add_argument('--uam_chi2', type=float, default=9.21,
+                                 help='UAM Mahalanobis gate (chi-square, 2-DOF): 5.99 = .95, '
+                                      '9.21 = .99 (more occlusion-tolerant). Statistical '
+                                      'constant, rarely tuned.')
+        self.parser.add_argument('--uam_cos_thresh', type=float, default=0.4,
+                                 help='UAM max appearance (cosine) distance for a valid match — '
+                                      'the single real association knob.')
         self.parser.add_argument('--legacy_fuse', action='store_true',
                                  help='force the old multiplicative fuse_score_three (A/B).')
         self.parser.add_argument('--am_tau', type=float, default=0.07,

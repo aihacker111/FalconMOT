@@ -44,8 +44,29 @@
 #         self.update_features(temp_feat)
 #         self.features = deque([], maxlen=buff_size)
 
+#         # Query Appearance-Motion: value-space appearance template (set by the
+#         # tracker from the dense map). Used to correlate against the next frame.
+#         self.template = None
+#         self.pred_xy = None    # appearance-predicted centre (orig coords), if any
+
 #         self.curr_tlwh = np.asarray(tlwh, dtype=np.float32)
 #         self.tlwh_deque = deque([], maxlen=30)
+
+#     def update_template(self, feat, alpha=0.9):
+#         """EMA-update the value-space appearance template (L2-normalised)."""
+#         if feat is None:
+#             return
+#         feat = np.asarray(feat, dtype=np.float32)
+#         n = np.linalg.norm(feat)
+#         if n > 0:
+#             feat = feat / n
+#         if self.template is None:
+#             self.template = feat
+#         else:
+#             self.template = alpha * self.template + (1.0 - alpha) * feat
+#             tn = np.linalg.norm(self.template)
+#             if tn > 0:
+#                 self.template = self.template / tn
 
 #     def update_features(self, feat, alpha=None):
 #         """L2-normalise the embedding and update the EMA `smooth_feat`."""
@@ -116,6 +137,7 @@
 #         self.mean, self.covariance = self.kalman_filter.update(
 #             self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh))
 #         self.update_features(new_track.curr_feat)
+#         self.update_template(new_track.template)
 
 #         self.curr_tlwh = new_track.curr_tlwh
 #         self.tlwh_deque.append((frame_id, new_track.curr_tlwh))
@@ -144,6 +166,7 @@
 #         self.tlwh_deque.append((frame_id, new_track.curr_tlwh))
 #         if update_feature:
 #             self.update_features(new_track.curr_feat, alpha)
+#             self.update_template(new_track.template, alpha=0.9)
 
 #     @property
 #     def tlwh(self):
@@ -202,9 +225,109 @@
 #         self.gmc = GMC(method='sparseOptFlow', verbose=[None, False])
 #         self._curr_img = None   # set via set_image() before update()
 
+#         # ── Query Appearance-Motion (QAM) config ──
+#         self.use_am       = getattr(opt, 'use_appearance_motion', False)
+#         self.legacy_fuse  = getattr(opt, 'legacy_fuse', False)
+#         self.am_tau       = getattr(opt, 'am_tau', 0.07)
+#         self.am_kappa     = getattr(opt, 'am_kappa', 0.1)
+#         self.am_beta      = getattr(opt, 'am_beta', 4.0)
+#         self.w_app        = getattr(opt, 'am_w_app', 1.0)
+#         self.w_iou        = getattr(opt, 'am_w_iou', 1.0)
+#         self.match_thresh = getattr(opt, 'match_thresh', 0.7)
+#         self.proximity_gate = getattr(opt, 'proximity_thresh', 0.95)
+#         self.motion_gate    = getattr(opt, 'motion_gate', 0.9)
+
+#         # per-frame dense appearance state (set via set_dense())
+#         self._dense_hat = None    # [C,H,W] L2-normalised current map (torch)
+#         self._dense_raw = None    # [C,H,W] raw current map (torch, for sampling)
+#         self._tf = None           # (stride, ratio, pad_w, pad_h)
+
 #     def set_image(self, img):
 #         """Provide the raw BGR frame (for GMC) before calling update()."""
 #         self._curr_img = img
+
+#     def set_dense(self, reid_dense, stride, ratio_x, ratio_y, pad_w=0.0, pad_h=0.0):
+#         """Provide the current-frame dense appearance map + image transform.
+
+#         Coordinate convention must MATCH the box decode in the postprocessor:
+#           • plain resize (this repo): ratio_x=net_w/orig_w, ratio_y=net_h/orig_h,
+#             pad_w=pad_h=0 (anisotropic, no letterbox).
+#           • letterbox: ratio_x=ratio_y=min(net/orig), pad centred.
+
+#         Args:
+#             reid_dense : torch [C,H,W] value-projected appearance map (or None).
+#             stride     : feature stride of the map w.r.t. network input.
+#             ratio_x, ratio_y, pad_w, pad_h : net<->orig mapping (per axis).
+#         """
+#         if reid_dense is None:
+#             self._dense_hat = self._dense_raw = self._tf = None
+#             return
+#         from falconmot.tracker import appearance_motion as am
+#         self._dense_raw = reid_dense
+#         self._dense_hat = am.normalize_dense(reid_dense)
+#         self._tf = (float(stride), float(ratio_x), float(ratio_y),
+#                     float(pad_w), float(pad_h))
+
+#     @staticmethod
+#     def _centers_orig(items):
+#         """(N,2) box centres in original-image coords from a list of MCTrack."""
+#         return np.array([[t.tlwh[0] + t.tlwh[2] * 0.5,
+#                           t.tlwh[1] + t.tlwh[3] * 0.5] for t in items],
+#                         dtype=np.float32)
+
+#     def _sample_det_templates(self, dets):
+#         """Sample each detection's value-space appearance template from the map."""
+#         if self._dense_raw is None or len(dets) == 0:
+#             return
+#         import torch
+#         from falconmot.tracker import appearance_motion as am
+#         stride, rx, ry, pw, ph = self._tf
+#         cmap = am.orig_to_map(self._centers_orig(dets), stride, rx, ry, pw, ph)
+#         xy = torch.from_numpy(cmap).to(self._dense_raw.device).float()
+#         feats = am.sample_dense(self._dense_raw, xy).cpu().numpy()   # (D, C)
+#         for d, f in zip(dets, feats):
+#             n = np.linalg.norm(f)
+#             d.template = (f / n) if n > 0 else f
+
+#     def _appearance_motion(self, pool, dets):
+#         """Predict pool-track centres by correlation; return (d_mot, w_mot).
+
+#         d_mot : (T, D) size-adaptive Gaussian motion distance.
+#         w_mot : (T,)   entropy-gated confidence (0 for tracks without template).
+#         """
+#         import torch
+#         from falconmot.tracker import appearance_motion as am
+#         T, D = len(pool), len(dets)
+#         d_mot = np.ones((T, D), dtype=np.float32)
+#         w_mot = np.zeros((T,), dtype=np.float32)
+
+#         tmpls, idx = [], []
+#         for i, t in enumerate(pool):
+#             if t.template is not None:
+#                 tmpls.append(t.template)
+#                 idx.append(i)
+#         if not idx:
+#             return d_mot, w_mot
+
+#         stride, rx, ry, pw, ph = self._tf
+#         tt = torch.from_numpy(np.stack(tmpls)).to(self._dense_hat.device).float()
+#         tt = torch.nn.functional.normalize(tt, dim=1)
+#         centers_map, ent, _peak = am.predict_centers(tt, self._dense_hat, tau=self.am_tau)
+#         centers_map = centers_map.cpu().numpy()
+#         ent = ent.cpu().numpy()
+
+#         pred_orig = am.map_to_orig(centers_map, stride, rx, ry, pw, ph)        # (K, 2)
+#         det_orig  = self._centers_orig(dets)                                  # (D, 2)
+#         sizes = np.array([np.sqrt(max(pool[i].tlwh[2] * pool[i].tlwh[3], 1.0))
+#                           for i in idx], dtype=np.float32)
+#         dm = matching.motion_distance(pred_orig, det_orig, sizes, kappa=self.am_kappa)
+#         wm = am.confidence_from_entropy(ent, beta=self.am_beta)
+
+#         for k, i in enumerate(idx):
+#             d_mot[i] = dm[k]
+#             w_mot[i] = wm[k]
+#             pool[i].pred_xy = pred_orig[k]
+#         return d_mot, w_mot
 
 #     def reset(self):
 #         """Clear all state — call between sequences."""
@@ -264,11 +387,28 @@
 #                 MCTrack.multi_gmc(track_pool_dict[cls_id], gmc_H)
 #                 MCTrack.multi_gmc(unconfirmed_dict[cls_id], gmc_H)
 
-#             # --- Step 1: first association — ReID embedding + IoU ---
-#             dists = matching.embedding_distance(track_pool_dict[cls_id], cls_detects)
-#             dist_iou = matching.iou_distance(track_pool_dict[cls_id], cls_detects)
-#             dist_iou = matching.fuse_score_three(dist_iou, dists, cls_detects)
-#             matches, u_track, u_detection = matching.linear_assignment(dist_iou, thresh=0.6)
+#             # Sample value-space appearance templates for detections (QAM).
+#             if self.use_am and self._dense_raw is not None:
+#                 self._sample_det_templates(cls_detects)
+
+#             # --- Step 1: first association — appearance + IoU (+ motion) ---
+#             pool = track_pool_dict[cls_id]
+#             emb_d = matching.embedding_distance(pool, cls_detects)
+#             iou_d = matching.iou_distance(pool, cls_detects)
+
+#             if self.legacy_fuse or not self.use_am:
+#                 cost = matching.fuse_score_three(iou_d, emb_d, cls_detects)
+#                 thr  = 0.6
+#             else:
+#                 d_mot, w_mot = None, None
+#                 if self._dense_hat is not None and len(pool) > 0 and len(cls_detects) > 0:
+#                     d_mot, w_mot = self._appearance_motion(pool, cls_detects)
+#                 cost = matching.fuse_loglik(
+#                     emb_d, iou_d, d_mot, w_mot,
+#                     w_app=self.w_app, w_iou=self.w_iou,
+#                     proximity_gate=self.proximity_gate, motion_gate=self.motion_gate)
+#                 thr  = self.match_thresh
+#             matches, u_track, u_detection = matching.linear_assignment(cost, thresh=thr)
 
 #             for i_tracked, i_det in matches:
 #                 track = track_pool_dict[cls_id][i_tracked]
@@ -627,14 +767,12 @@ class MCJDETracker(object):
         # ── Query Appearance-Motion (QAM) config ──
         self.use_am       = getattr(opt, 'use_appearance_motion', False)
         self.legacy_fuse  = getattr(opt, 'legacy_fuse', False)
-        self.am_tau       = getattr(opt, 'am_tau', 0.07)
-        self.am_kappa     = getattr(opt, 'am_kappa', 0.1)
-        self.am_beta      = getattr(opt, 'am_beta', 4.0)
-        self.w_app        = getattr(opt, 'am_w_app', 1.0)
-        self.w_iou        = getattr(opt, 'am_w_iou', 1.0)
-        self.match_thresh = getattr(opt, 'match_thresh', 0.7)
-        self.proximity_gate = getattr(opt, 'proximity_thresh', 0.95)
-        self.motion_gate    = getattr(opt, 'motion_gate', 0.9)
+        # UAM: only a temperature (response resolution), a chi-square gate
+        # (statistical constant), and the appearance cosine ceiling (the one
+        # real knob). No sigma / beta / cue-weights / proximity gates.
+        self.uam_tau      = getattr(opt, 'am_tau', 0.1)
+        self.uam_chi2     = getattr(opt, 'uam_chi2', 9.21)      # χ²₂ at 0.99
+        self.uam_cos      = getattr(opt, 'uam_cos_thresh', 0.4)
 
         # per-frame dense appearance state (set via set_dense())
         self._dense_hat = None    # [C,H,W] L2-normalised current map (torch)
@@ -688,45 +826,69 @@ class MCJDETracker(object):
             n = np.linalg.norm(f)
             d.template = (f / n) if n > 0 else f
 
-    def _appearance_motion(self, pool, dets):
-        """Predict pool-track centres by correlation; return (d_mot, w_mot).
+    def _uam_predict(self, pool):
+        """Uncertainty-aware fused position per track: Kalman ⊕ correlation.
 
-        d_mot : (T, D) size-adaptive Gaussian motion distance.
-        w_mot : (T,)   entropy-gated confidence (0 for tracks without template).
+        For every track, project the Kalman state to a position mean+cov, and
+        (if the track has an appearance template and the dense map is available)
+        correlate to get a second position estimate with its own measured
+        covariance, then fuse by inverse-variance. A diffuse/occluded response
+        has large covariance and is automatically discounted toward Kalman.
+
+        Returns:
+            means : (T, 2) fused predicted centres (orig coords).
+            covs  : (T, 2, 2) fused covariances (orig pixel^2).
         """
         import torch
         from falconmot.tracker import appearance_motion as am
-        T, D = len(pool), len(dets)
-        d_mot = np.ones((T, D), dtype=np.float32)
-        w_mot = np.zeros((T,), dtype=np.float32)
+        T = len(pool)
+        means = np.zeros((T, 2), dtype=np.float32)
+        covs  = np.zeros((T, 2, 2), dtype=np.float32)
 
-        tmpls, idx = [], []
+        # 1) Kalman position mean + covariance (measurement space = orig coords)
         for i, t in enumerate(pool):
-            if t.template is not None:
-                tmpls.append(t.template)
-                idx.append(i)
-        if not idx:
-            return d_mot, w_mot
+            pm, pc = self.kalman_filter.project(t.mean, t.covariance)
+            means[i] = pm[:2]
+            covs[i]  = pc[:2, :2]
+            # Occlusion handling: a coasted track is genuinely more uncertain the
+            # longer it goes unobserved (the constant-velocity prediction drifts),
+            # but the KF reports an over-confident covariance. Inflate by the
+            # frames-since-update so (a) the Mahalanobis gate widens for tolerant
+            # re-acquisition and (b) a fresh appearance correlation can override
+            # the stale motion prediction. Freshly-tracked tracks (dt=0) untouched.
+            dt = max(self.frame_id - t.frame_id - 1, 0)
+            if dt > 0:
+                covs[i] = covs[i] * float((1 + dt) ** 2)
 
-        stride, rx, ry, pw, ph = self._tf
-        tt = torch.from_numpy(np.stack(tmpls)).to(self._dense_hat.device).float()
-        tt = torch.nn.functional.normalize(tt, dim=1)
-        centers_map, ent, _peak = am.predict_centers(tt, self._dense_hat, tau=self.am_tau)
-        centers_map = centers_map.cpu().numpy()
-        ent = ent.cpu().numpy()
-
-        pred_orig = am.map_to_orig(centers_map, stride, rx, ry, pw, ph)        # (K, 2)
-        det_orig  = self._centers_orig(dets)                                  # (D, 2)
-        sizes = np.array([np.sqrt(max(pool[i].tlwh[2] * pool[i].tlwh[3], 1.0))
-                          for i in idx], dtype=np.float32)
-        dm = matching.motion_distance(pred_orig, det_orig, sizes, kappa=self.am_kappa)
-        wm = am.confidence_from_entropy(ent, beta=self.am_beta)
-
-        for k, i in enumerate(idx):
-            d_mot[i] = dm[k]
-            w_mot[i] = wm[k]
-            pool[i].pred_xy = pred_orig[k]
-        return d_mot, w_mot
+        # 2) correlation estimates for tracks that have a template
+        if self._dense_hat is not None:
+            tmpls, idx = [], []
+            for i, t in enumerate(pool):
+                if t.template is not None:
+                    tmpls.append(t.template)
+                    idx.append(i)
+            if idx:
+                stride, rx, ry, pw, ph = self._tf
+                tt = torch.from_numpy(np.stack(tmpls)).to(self._dense_hat.device).float()
+                tt = torch.nn.functional.normalize(tt, dim=1)
+                cmap, covmap, peak = am.predict_centers_cov(
+                    tt, self._dense_hat, tau=self.uam_tau)
+                cmap   = cmap.cpu().numpy()
+                covmap = covmap.cpu().numpy()
+                peak   = peak.cpu().numpy()
+                c_orig   = am.map_to_orig(cmap, stride, rx, ry, pw, ph)
+                ccov_orig = am.cov_map_to_orig(covmap, stride, rx, ry)
+                # 3) inverse-variance fuse Kalman ⊕ correlation. Inflate the
+                #    correlation covariance by 1/peak so a weak match (low cosine
+                #    peak) is trusted less — quality folds into the variance.
+                for k, i in enumerate(idx):
+                    q = max(float(peak[k]), 0.1)
+                    cc = ccov_orig[k] / q
+                    x, P = matching.inv_var_fuse(means[i], covs[i], c_orig[k], cc)
+                    means[i] = x
+                    covs[i]  = P
+                    pool[i].pred_xy = x
+        return means, covs
 
     def reset(self):
         """Clear all state — call between sequences."""
@@ -790,23 +952,30 @@ class MCJDETracker(object):
             if self.use_am and self._dense_raw is not None:
                 self._sample_det_templates(cls_detects)
 
-            # --- Step 1: first association — appearance + IoU (+ motion) ---
+            # --- Step 1: first association ---
             pool = track_pool_dict[cls_id]
-            emb_d = matching.embedding_distance(pool, cls_detects)
-            iou_d = matching.iou_distance(pool, cls_detects)
+            emb_d = matching.embedding_distance(pool, cls_detects)   # cosine (appearance)
 
             if self.legacy_fuse or not self.use_am:
+                # legacy multiplicative IoU×ReID fusion (back-compat / A/B)
+                iou_d = matching.iou_distance(pool, cls_detects)
                 cost = matching.fuse_score_three(iou_d, emb_d, cls_detects)
                 thr  = 0.6
+            elif self._dense_hat is not None and len(pool) > 0 and len(cls_detects) > 0:
+                # UAM: Kalman ⊕ correlation fused position → Mahalanobis gate,
+                # appearance cosine cost (DeepSORT-style cascade). Self-calibrating
+                # via measured covariances; one knob (cosine ceiling).
+                means, covs = self._uam_predict(pool)
+                det_xy = self._centers_orig(cls_detects)
+                cost = matching.maha_gate_cost(
+                    means, covs, det_xy, emb_d,
+                    chi2=self.uam_chi2, cos_thresh=self.uam_cos)
+                thr  = self.uam_cos
             else:
-                d_mot, w_mot = None, None
-                if self._dense_hat is not None and len(pool) > 0 and len(cls_detects) > 0:
-                    d_mot, w_mot = self._appearance_motion(pool, cls_detects)
-                cost = matching.fuse_loglik(
-                    emb_d, iou_d, d_mot, w_mot,
-                    w_app=self.w_app, w_iou=self.w_iou,
-                    proximity_gate=self.proximity_gate, motion_gate=self.motion_gate)
-                thr  = self.match_thresh
+                # QAM enabled but no dense map this frame → fall back to IoU+app
+                iou_d = matching.iou_distance(pool, cls_detects)
+                cost = matching.fuse_score_three(iou_d, emb_d, cls_detects)
+                thr  = 0.6
             matches, u_track, u_detection = matching.linear_assignment(cost, thresh=thr)
 
             for i_tracked, i_det in matches:

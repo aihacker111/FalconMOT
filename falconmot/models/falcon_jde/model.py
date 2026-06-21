@@ -139,6 +139,25 @@
 #         v = v.permute(0, 2, 3, 1).contiguous()        # [B, n_head, head_dim, HW]
 #         return [v], [[H, W]]
 
+#     @torch.no_grad()
+#     def dense_appearance(self, feat: torch.Tensor) -> torch.Tensor:
+#         """Per-pixel appearance map in the SAME space the deform-attn samples.
+
+#         Applies the head's `value_proj` densely so that a track template
+#         (bilinearly sampled from this map) and the dense map live in one metric
+#         space — the prerequisite for the cross-frame correlation in
+#         `appearance_motion.predict_centers`.
+
+#         Args:
+#             feat : [B, C, H, W] shared appearance feature map (`reid_feat`).
+#         Returns:
+#             [B, C, H, W] value-projected dense appearance map.
+#         """
+#         B, C, H, W = feat.shape
+#         v = feat.flatten(2).permute(0, 2, 1)          # [B, HW, C]
+#         v = self.value_proj(v)                        # [B, HW, C]
+#         return v.permute(0, 2, 1).reshape(B, C, H, W)
+
 #     def forward(self, query: torch.Tensor, boxes: torch.Tensor,
 #                 feat: torch.Tensor) -> dict:
 #         """
@@ -215,6 +234,9 @@
 #         self.backbone   = backbone
 #         self.encoder    = encoder
 #         self.decoder    = decoder
+#         # Set True by the tracking script to emit the dense appearance map
+#         # (Query Appearance-Motion). Off by default → training / eval-mAP unchanged.
+#         self.return_reid_dense = False
 #         self.use_s4     = use_s4
 #         self.use_s4_aux = use_s4_aux
 #         self.use_reid   = use_reid
@@ -270,6 +292,12 @@
 #             reid_out = self.reid_head(hs, pred_boxes, reid_feat)
 #             out['pred_reid']     = reid_out['emb']      # post-neck → CE + eval
 #             out['pred_reid_raw'] = reid_out['emb_raw']  # pre-neck  → triplet
+
+#             # Dense appearance map for Query Appearance-Motion (tracking only).
+#             # Cheap (one Linear over H*W); gated so training/eval-mAP are untouched.
+#             if getattr(self, 'return_reid_dense', False) and not self.training:
+#                 out['reid_dense']        = self.reid_head.dense_appearance(reid_feat)
+#                 out['reid_dense_stride'] = 4 if self.use_s4 else 8
 #         elif 'eval_hs' in out:
 #             out.pop('eval_hs')
 
@@ -463,6 +491,8 @@
 #         load_pretrained(model, ckpt_path, verbose=True)
 
 #     return model
+
+
 
 
 
