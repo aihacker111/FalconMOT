@@ -91,6 +91,37 @@ class TripletLoss(nn.Module):
         return self.ranking_loss(dist_an, dist_ap, y)
 
 
+
+
+
+
+
+
+def wasserstein_loss(pred, target, eps=1e-7, constant=0.1):
+    """
+    Tính NWD cho Bounding Box đã được chuẩn hóa [0, 1] (cx, cy, w, h).
+    constant=0.1 là hằng số nén phân phối Gauss trong không gian chuẩn hóa.
+    """
+    b1_cx, b1_cy, b1_w, b1_h = pred.unbind(-1)
+    b2_cx, b2_cy, b2_w, b2_h = target.unbind(-1)
+    
+    # Khoảng cách giữa 2 tâm (Center distance)
+    center_distance = (b1_cx - b2_cx)**2 + (b1_cy - b2_cy)**2
+    
+    # Khoảng cách giữa 2 kích thước (Width/Height distance)
+    wh_distance = ((b1_w / 2) - (b2_w / 2))**2 + ((b1_h / 2) - (b2_h / 2))**2
+    
+    # Tính Wasserstein distance squared
+    wasserstein_2 = center_distance + wh_distance
+    
+    # Chuyển đổi thành dạng tương đồng IoU (Normalized) -> Giá trị từ [0, 1]
+    nwd = torch.exp(-torch.sqrt(wasserstein_2 + eps) / constant)
+    
+    # Return dạng Loss (1 - NWD giống hệt 1 - IoU)
+    return 1 - nwd
+
+
+
 # ---------------------------------------------------------------------------
 # Main criterion
 # ---------------------------------------------------------------------------
@@ -239,19 +270,48 @@ class FalconJDECriterion(nn.Module):
     #     loss = loss.sum() / num_boxes
     #     return {'loss_cls': loss}
 
+    # def loss_boxes(self, outputs, targets, indices, num_boxes, boxes_weight=None):
+    #     idx = self._get_src_permutation_idx(indices)
+    #     src_boxes = outputs['pred_boxes'][idx]
+    #     tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+    #     loss_bbox = F.l1_loss(src_boxes, tgt_boxes, reduction='none')
+    #     loss_giou = 1 - torch.diag(generalized_box_iou(
+    #         box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(tgt_boxes)))
+    #     if boxes_weight is not None:
+    #         loss_giou = loss_giou * boxes_weight
+    #     return {
+    #         'loss_bbox': loss_bbox.sum() / num_boxes,
+    #         'loss_giou': loss_giou.sum() / num_boxes,
+    #     }
     def loss_boxes(self, outputs, targets, indices, num_boxes, boxes_weight=None):
-        idx = self._get_src_permutation_idx(indices)
-        src_boxes = outputs['pred_boxes'][idx]
-        tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-        loss_bbox = F.l1_loss(src_boxes, tgt_boxes, reduction='none')
-        loss_giou = 1 - torch.diag(generalized_box_iou(
-            box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(tgt_boxes)))
-        if boxes_weight is not None:
-            loss_giou = loss_giou * boxes_weight
-        return {
-            'loss_bbox': loss_bbox.sum() / num_boxes,
-            'loss_giou': loss_giou.sum() / num_boxes,
-        }
+            idx = self._get_src_permutation_idx(indices)
+            src_boxes = outputs['pred_boxes'][idx]
+            tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+            
+            # 1. Loss L1 (Giữ nguyên)
+            loss_bbox = F.l1_loss(src_boxes, tgt_boxes, reduction='none')
+            
+            # 2. Loss GIoU (Giữ nguyên)
+            loss_giou = 1 - torch.diag(generalized_box_iou(
+                box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(tgt_boxes)))
+                
+            # 3. THÊM MỚI: Loss NWD 
+            loss_nwd = wasserstein_loss(src_boxes, tgt_boxes)
+            
+            # 4. KẾT HỢP (Mix-up):
+            # Ta dùng trung bình cộng giữa GIoU và NWD. 
+            # Cách này đảm bảo giá trị loss tổng không bị phình to lên, 
+            # giữ nguyên hệ số scale ~100 ban đầu của bạn!
+            loss_iou_mixed = 0.5 * loss_giou + 0.5 * loss_nwd
+
+            if boxes_weight is not None:
+                # Nếu có cơ chế weight (như trong DEIM), áp dụng cho loss mixed
+                loss_iou_mixed = loss_iou_mixed * boxes_weight
+                
+            return {
+                'loss_bbox': loss_bbox.sum() / num_boxes,
+                'loss_giou': loss_iou_mixed.sum() / num_boxes, # Trả về tên cũ để weight_dict vẫn hiểu
+            }
 
     # ------------------------------------------------------------------
     # ReID loss
