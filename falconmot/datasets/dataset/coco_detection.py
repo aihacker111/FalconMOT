@@ -809,8 +809,10 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         self.max_objs = getattr(opt, 'K', 300)
 
         self.default_input_wh = [self.height, self.width]
-        self.mean = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        self.std  = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        # self.mean = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        # self.std  = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        self.mean = np.array(getattr(opt, 'mean', [0.485, 0.456, 0.406]), dtype=np.float32)
+        self.std  = np.array(getattr(opt, 'std', [0.229, 0.224, 0.225]), dtype=np.float32)
 
         self.cur_epoch  = 0
         stop_epoch      = getattr(opt, 'stop_epoch', -1)
@@ -886,8 +888,8 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         self.small_obj_zoom_prob   = getattr(opt, 'small_obj_zoom_prob',  0.5)
         
         # New Augmentations
-        self.use_zoom_out          = getattr(opt, 'zoom_out',             True)
-        self.zoom_out_prob         = getattr(opt, 'zoom_out_prob',        0.5)
+        self.use_zoom_out          = True
+        self.zoom_out_prob         = 0.4
         self.use_random_crop       = getattr(opt, 'random_crop',          True)
         self.random_crop_prob      = getattr(opt, 'random_crop_prob',     0.4)
 
@@ -1133,8 +1135,8 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
                 img, labels = random_zoom_out(img, labels, max_scale=1.5, fill_value=0, p=self.zoom_out_prob)
 
             # 3. Random Crop (Thu hẹp cục bộ)
-            if do_aug and self.use_random_crop:
-                img, labels = random_crop(img, labels, scale_range=(0.6, 1.0), p=self.random_crop_prob)
+            # if do_aug and self.use_random_crop:
+            #     img, labels = random_crop(img, labels, scale_range=(0.6, 1.0), p=self.random_crop_prob)
 
             # 4. Plain Resize về mạng (960, 544) -> Kết hợp bước 3 thành Crop-Resize
             img = cv2.resize(img, (self.width, self.height), interpolation=cv2.INTER_AREA)
@@ -1184,9 +1186,9 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
             img = np.fliplr(img)
             if len(labels) > 0:
                 labels[:, 2] = 1.0 - labels[:, 2]
-
         # ── Đóng gói Tensor ──────────────────────────────────────────────
         img = img[:, :, ::-1].astype(np.float32) / 255.0
+        img = (img - self.mean) / self.std
         img = torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1)))
 
         num_objs       = min(len(labels), self.max_objs)
@@ -1217,6 +1219,7 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
 
 def preprocess_for_tracking(img0, width: int, height: int):
     img = cv2.resize(img0, (width, height), interpolation=cv2.INTER_AREA)
+    img = (img - self.mean) / self.std
     img = img[:, :, ::-1].astype(np.float32) / 255.0
     return np.ascontiguousarray(img.transpose(2, 0, 1))
 

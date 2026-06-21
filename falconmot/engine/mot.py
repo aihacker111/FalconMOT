@@ -60,7 +60,7 @@ def _build_criterion(opt) -> FalconJDECriterion:
         use_reid            = getattr(opt, 'use_reid', True),
         id_weight           = getattr(opt, 'id_weight', 1.0),
         use_triplet         = getattr(opt, 'tri', False),
-        cls_loss_type.      = getattr(opt, 'cls_loss_type', 'ia_bce')
+        cls_loss_type      = getattr(opt, 'cls_loss_type', 'ia_bce'),
         # Plain CE + emb_scale is the stable FairMOT/AMOT recipe and the default.
         # ArcFace is opt-in (set --use_arcface) — it tends to overfit a low-capacity
         # head, which is exactly what degraded ReID over epochs previously.
