@@ -772,7 +772,8 @@ class MCJDETracker(object):
         # real knob). No sigma / beta / cue-weights / proximity gates.
         self.uam_tau      = getattr(opt, 'am_tau', 0.1)
         self.uam_chi2     = getattr(opt, 'uam_chi2', 9.21)      # χ²₂ at 0.99
-        self.uam_cos      = getattr(opt, 'uam_cos_thresh', 0.4)
+        self.uam_cos      = getattr(opt, "uam_cos_thresh", 0.4)
+        self.uam_iou_gate = getattr(opt, "uam_iou_gate", 0.7)
 
         # per-frame dense appearance state (set via set_dense())
         self._dense_hat = None    # [C,H,W] L2-normalised current map (torch)
@@ -967,9 +968,11 @@ class MCJDETracker(object):
                 # via measured covariances; one knob (cosine ceiling).
                 means, covs = self._uam_predict(pool)
                 det_xy = self._centers_orig(cls_detects)
+                iou_d = matching.iou_distance(pool, cls_detects)
                 cost = matching.maha_gate_cost(
                     means, covs, det_xy, emb_d,
-                    chi2=self.uam_chi2, cos_thresh=self.uam_cos)
+                    chi2=self.uam_chi2, cos_thresh=self.uam_cos,
+                    iou_dists=iou_d, iou_gate=self.uam_iou_gate)
                 thr  = self.uam_cos
             else:
                 # QAM enabled but no dense map this frame → fall back to IoU+app

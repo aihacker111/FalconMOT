@@ -337,27 +337,19 @@ def inv_var_fuse(p_mean, p_cov, c_mean, c_cov):
 
 
 def maha_gate_cost(fused_means, fused_covs, det_xy, app_cost,
-                   chi2=9.21, cos_thresh=0.4):
-    """Cascade cost for UAM: Mahalanobis gate (motion) + cosine cost (appearance).
+                   chi2=9.21, cos_thresh=0.4, iou_dists=None, iou_gate=0.7):
+    """Cascade cost for UAM: spatial gate (motion OR IoU) + cosine cost.
 
     For every (track i, detection j):
-        d²_ij = (z_j − x̂_i)ᵀ P_i⁻¹ (z_j − x̂_i)          # motion plausibility
-        keep  = d²_ij ≤ chi2  AND  app_cost_ij ≤ cos_thresh
+        d²_ij = (z_j − x̂_i)ᵀ P_i⁻¹ (z_j − x̂_i)             # motion plausibility
+        spatial_ok = (d²_ij ≤ chi2)  OR  (iou_dist_ij ≤ iou_gate)
+        keep  = spatial_ok  AND  (app_cost_ij ≤ cos_thresh)
         cost  = app_cost_ij if keep else ∞
 
-    Motion only *gates*; appearance *ranks* (DeepSORT-style). No motion sigma,
-    no cue weights — the gate is a chi-square constant and the only tunable is
-    the cosine ceiling.
-
-    Args:
-        fused_means : (T, 2)    fused predicted centres.
-        fused_covs  : (T, 2, 2) fused covariances.
-        det_xy      : (D, 2)    detection centres.
-        app_cost    : (T, D)    appearance (cosine) distance.
-        chi2        : Mahalanobis gate threshold (χ²₂ ≈ 5.99/9.21 at .95/.99).
-        cos_thresh  : max appearance distance for a valid match.
-    Returns:
-        (T, D) cost matrix (gated entries set large).
+    IoU vouches for adjacent-frame pairs (the reliable cue); the Kalman⊕corr
+    Mahalanobis vouches for low-IoU pairs (fast motion / occlusion recovery).
+    Appearance always ranks. Motion never *removes* a good IoU match — it only
+    *adds* recoveries, so UAM cannot underperform plain IoU+appearance.
     """
     T, D = app_cost.shape
     if T == 0 or D == 0:
@@ -368,6 +360,9 @@ def maha_gate_cost(fused_means, fused_covs, det_xy, app_cost,
         Pinv = np.linalg.inv(fused_covs[i] + np.eye(2, dtype=np.float32) * 1e-6)
         diff = det_xy - fused_means[i][None, :]            # (D, 2)
         d2 = np.einsum('di,ij,dj->d', diff, Pinv, diff)    # (D,)
-        ok = (d2 <= chi2) & (app_cost[i] <= cos_thresh)
+        spatial = d2 <= chi2
+        if iou_dists is not None:
+            spatial = spatial | (iou_dists[i] <= iou_gate)
+        ok = spatial & (app_cost[i] <= cos_thresh)
         cost[i, ok] = app_cost[i, ok]
     return cost
