@@ -481,6 +481,7 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         reid_dim=reid_dim,
         use_s4=use_s4,
         use_s4_aux=getattr(opt, 'use_s4_aux', True),
+        use_reid=getattr(opt, 'use_reid', True),
         sta_dim=sta_dim,
         reid_num_points=getattr(opt, 'reid_num_points', 8),
         reid_grad_scale=getattr(opt, 'reid_grad_scale', 1.0),
