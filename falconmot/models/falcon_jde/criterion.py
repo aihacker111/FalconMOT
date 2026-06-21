@@ -575,7 +575,8 @@ class FalconJDECriterion(nn.Module):
                      + (self.s_det + self.s_id))
         else:
             # total = torch.exp(-self.s_det) * det_loss + self.s_det
-            total = det_loss
+            # total = det_loss
+            total = torch.exp(-self.s_det.detach()) * det_loss + self.s_det.detach()
         total = total
 
         # Detached scalars for logging only.
