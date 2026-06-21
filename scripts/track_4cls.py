@@ -116,7 +116,6 @@ class SequenceRunner4cls:
             conf_thres=opt.conf_thres,
             use_focal_loss=True,
         )
-        self.postprocessor.set_net_hw(net_h, net_w)
 
         # Tracker chạy trên 4cls space (sau remap).
         opt_tracker        = type('Opt', (), dict(vars(opt)))()   # shallow copy
