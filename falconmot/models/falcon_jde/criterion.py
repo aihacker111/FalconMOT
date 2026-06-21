@@ -115,10 +115,10 @@ class FalconJDECriterion(nn.Module):
         reg_max:             int   = 32,
         boxes_weight_format: str   = None,
         use_uni_set:         bool  = True,
-        use_reid:            bool  = True,
+        use_reid:            bool  = False,
         id_weight:           float = 1.0,
         use_triplet:         bool  = False,
-        use_arcface:         bool  = True,
+        use_arcface:         bool  = False,
         s_det_init:          float = 2.5,
         s_id_init:           float = 1.85,
     ):

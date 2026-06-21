@@ -326,8 +326,8 @@ def _print_stage1_banner(opt):
 def _summarize_model(model, opt):
     core = model.module if hasattr(model, 'module') else model
     print(f'[model] use_s4={getattr(core, "use_s4", False)}  '
-          f'use_s4_aux={getattr(core, "use_s4_aux", True)}  '
-          f'use_reid={getattr(core, "use_reid", True)}  '
+          f'use_s4_aux={getattr(core, "use_s4_aux", False)}  '
+          f'use_reid={getattr(core, "use_reid", False)}  '
           f's4_branch={hasattr(core, "s4_branch")}  '
           f'reid_head={hasattr(core, "reid_head")}')
     if getattr(opt, 'train_single_det', False) and getattr(opt, 'use_s4', False) \
