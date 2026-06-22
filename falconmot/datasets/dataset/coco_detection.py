@@ -1188,7 +1188,7 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
                 labels[:, 2] = 1.0 - labels[:, 2]
         # ── Đóng gói Tensor ──────────────────────────────────────────────
         img = img[:, :, ::-1].astype(np.float32) / 255.0
-        img = (img - self.mean) / self.std
+        # img = (img - self.mean) / self.std
         img = torch.from_numpy(np.ascontiguousarray(img.transpose(2, 0, 1)))
 
         num_objs       = min(len(labels), self.max_objs)
@@ -1219,7 +1219,7 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
 
 def preprocess_for_tracking(img0, width: int, height: int):
     img = cv2.resize(img0, (width, height), interpolation=cv2.INTER_AREA)
-    img = (img - self.mean) / self.std
+    # img = (img - self.mean) / self.std
     img = img[:, :, ::-1].astype(np.float32) / 255.0
     return np.ascontiguousarray(img.transpose(2, 0, 1))
 
