@@ -212,7 +212,7 @@ class FalconJDEWithLoss(nn.Module):
         self.model     = model
         self.criterion = criterion
 
-    def forward(self, batch, epoch):
+    def forward(self, batch, epoch=0):
         B = batch['input'].shape[0]
         targets = []
         for i in range(B):
