@@ -167,13 +167,13 @@ class FeatFusion(nn.Module):
         # CẢI TIẾN 1: Thay thế Gate Concat bằng Depthwise Spatial Gate
         # Chỉ tốn mid * 3 * 3 tham số (cực kỳ ít) thay vì (mid * 2) * mid của Conv 1x1 cũ
         self.gate_spatial = nn.Sequential(
-            nn.Conv2d(mid, mid, 3, padding=1, groups=mid, bias=True),
+            nn.Conv2d(mid, mid, 5, padding=2, groups=mid, bias=True),
             nn.Sigmoid()
         )
 
         self.simam = SimAM()
         # Giữ nguyên các block xử lý cốt lõi
-        self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand) for _ in range(n_blocks)])
+        self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand, k=7) for _ in range(n_blocks)])
 
         self.out    = nn.Conv2d(mid, hidden_dim, 1, bias=False)
         
@@ -191,7 +191,7 @@ class FeatFusion(nn.Module):
         
         # 3. CẢI TIẾN LƯU THÔNG: Sinh màng lọc từ Semantic (S8)
         # S8 mang thông tin vị trí vật thể tốt, dùng nó để tạo "mặt nạ che nhiễu"
-        g = self.gate_spatial(s)                                  # [B, mid, H4, W4] trong khoảng (0, 1)
+        g = self.gate_spatial(d * s)                                  # [B, mid, H4, W4] trong khoảng (0, 1)
         
         # 4. Gated Fusion dạng Nhân-Cộng (Element-wise Multiplication & Addition)
         # Loại bỏ hoàn toàn bước torch.cat -> Tiết kiệm bộ nhớ đệm VRAM tối đa
