@@ -455,50 +455,6 @@ class DEIMTransformer(nn.Module):
         return anchors, valid_mask
 
 
-    # def _get_decoder_input(self,
-    #                        memory: torch.Tensor,
-    #                        spatial_shapes,
-    #                        denoising_logits=None,
-    #                        denoising_bbox_unact=None):
-
-    #     # prepare input for decoder
-    #     if self.training or self.eval_spatial_size is None:
-    #         anchors, valid_mask = self._generate_anchors(spatial_shapes, device=memory.device)
-    #     else:
-    #         anchors = self.anchors
-    #         valid_mask = self.valid_mask
-    #     if memory.shape[0] > 1:
-    #         anchors = anchors.repeat(memory.shape[0], 1, 1)
-
-    #     # memory = torch.where(valid_mask, memory, 0)
-    #     memory = valid_mask.to(memory.dtype) * memory
-
-    #     enc_outputs_logits :torch.Tensor = self.enc_score_head(memory)
-
-    #     # select topk queries
-    #     enc_topk_memory, enc_topk_logits, enc_topk_anchors = \
-    #         self._select_topk(memory, enc_outputs_logits, anchors, self.num_queries)
-
-    #     enc_topk_bbox_unact :torch.Tensor = self.enc_bbox_head(enc_topk_memory) + enc_topk_anchors
-
-    #     enc_topk_bboxes_list, enc_topk_logits_list = [], []
-    #     if self.training:
-    #         enc_topk_bboxes = F.sigmoid(enc_topk_bbox_unact)
-    #         enc_topk_bboxes_list.append(enc_topk_bboxes)
-    #         enc_topk_logits_list.append(enc_topk_logits)
-
-    #     if self.learn_query_content:
-    #         content = self.tgt_embed.weight.unsqueeze(0).tile([memory.shape[0], 1, 1])
-    #     else:
-    #         content = enc_topk_memory.detach()
-
-    #     enc_topk_bbox_unact = enc_topk_bbox_unact.detach()
-
-    #     if denoising_bbox_unact is not None:
-    #         enc_topk_bbox_unact = torch.concat([denoising_bbox_unact, enc_topk_bbox_unact], dim=1)
-    #         content = torch.concat([denoising_logits, content], dim=1)
-
-    #     return content, enc_topk_bbox_unact, enc_topk_bboxes_list, enc_topk_logits_list
     def _get_decoder_input(self,
                            memory: torch.Tensor,
                            spatial_shapes,
@@ -519,45 +475,9 @@ class DEIMTransformer(nn.Module):
 
         enc_outputs_logits :torch.Tensor = self.enc_score_head(memory)
 
-        # =====================================================================
-        # THÊM MỚI: Ép Query Selection thiên vị nhánh S4 (Stride-4/Độ phân giải cao)
-        # =====================================================================
-        # Ta tạo một bản sao độc lập của logits để lấy index Top-K, 
-        # tránh làm ảnh hưởng đến hàm Loss (Loss vẫn cần logits gốc).
-        enc_outputs_logits_for_topk = enc_outputs_logits.clone()
-        
-        # spatial_shapes[0] là [h, w] của tầng đầu tiên (độ phân giải cao nhất).
-        # Tổng số pixel của tầng này là h * w.
-        # Do memory đã được flatten từ HxW thành 1 chiều, đoạn đầu tiên từ 0 đến h*w chính là của S4.
-        h4, w4 = spatial_shapes[0]
-        s4_length = h4 * w4
-        
-        # Bơm Bias (Ví dụ: +1.5) vào điểm phân loại của nhánh đầu tiên.
-        # Lưu ý: Bias này cộng vào giá trị logit (trước khi qua Sigmoid/Softmax).
-        bias_value = 1.5
-        enc_outputs_logits_for_topk[:, :s4_length, :] += bias_value
-        # =====================================================================
-
         # select topk queries
-        # THAY ĐỔI: Dùng enc_outputs_logits_for_topk để chọn index thay vì bản gốc
         enc_topk_memory, enc_topk_logits, enc_topk_anchors = \
-            self._select_topk(memory, enc_outputs_logits_for_topk, anchors, self.num_queries)
-        
-        # PHỤC HỒI: Thay vì dùng logit đã bị bias, ta phải lấy lại giá trị logit gốc 
-        # từ enc_outputs_logits để đưa vào decoder/loss (Đảm bảo tính trung thực của Loss).
-        if self.training:
-            # Lấy index (topk) mà _select_topk đã chọn ngầm
-            if self.query_select_method == 'default':
-                _, topk_ind = torch.topk(enc_outputs_logits_for_topk.max(-1).values, self.num_queries, dim=-1)
-            elif self.query_select_method == 'one2many':
-                _, topk_ind = torch.topk(enc_outputs_logits_for_topk.flatten(1), self.num_queries, dim=-1)
-                topk_ind = topk_ind // self.num_classes
-            elif self.query_select_method == 'agnostic':
-                _, topk_ind = torch.topk(enc_outputs_logits_for_topk.squeeze(-1), self.num_queries, dim=-1)
-            
-            # Khôi phục enc_topk_logits bằng logit GỐC chưa cộng bias
-            enc_topk_logits = enc_outputs_logits.gather(dim=1, \
-                index=topk_ind.unsqueeze(-1).repeat(1, 1, enc_outputs_logits.shape[-1]))
+            self._select_topk(memory, enc_outputs_logits, anchors, self.num_queries)
 
         enc_topk_bbox_unact :torch.Tensor = self.enc_bbox_head(enc_topk_memory) + enc_topk_anchors
 
@@ -565,7 +485,7 @@ class DEIMTransformer(nn.Module):
         if self.training:
             enc_topk_bboxes = F.sigmoid(enc_topk_bbox_unact)
             enc_topk_bboxes_list.append(enc_topk_bboxes)
-            enc_topk_logits_list.append(enc_topk_logits) # Bây giờ chứa logit gốc đúng chuẩn
+            enc_topk_logits_list.append(enc_topk_logits)
 
         if self.learn_query_content:
             content = self.tgt_embed.weight.unsqueeze(0).tile([memory.shape[0], 1, 1])

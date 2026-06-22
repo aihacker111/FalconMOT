@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from torchvision.ops.boxes import box_area
 
-NWD_CONSTANT = 0.05
+
 def box_cxcywh_to_xyxy(x):
     x_c, y_c, w, h = x.unbind(-1)
     b = [(x_c - 0.5 * w.clamp(min=0.0)), (y_c - 0.5 * h.clamp(min=0.0)),
