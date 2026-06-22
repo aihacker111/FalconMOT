@@ -195,7 +195,8 @@ class FeatFusion(nn.Module):
         
         # 4. Gated Fusion dạng Nhân-Cộng (Element-wise Multiplication & Addition)
         # Loại bỏ hoàn toàn bước torch.cat -> Tiết kiệm bộ nhớ đệm VRAM tối đa
-        x = (d * g) + s                                           
+        # x = (d * g) + s
+        x = g * d + (1.0 - g) * s                                        
         x = self.simam(x)
         # 5. Đi qua các block tinh lọc đặc trưng và bung kênh đầu ra
         x = self.blocks(x)

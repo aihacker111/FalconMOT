@@ -391,7 +391,7 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from typing import Dict
 
-from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou, box_iou
+from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou, box_iou, NWD_CONSTANT
 
 # from ..core import register
 import numpy as np
@@ -400,7 +400,7 @@ import numpy as np
 # =================================================================================
 # THÊM MỚI: Hàm tính ma trận chi phí Wasserstein (NWD Cost Matrix) cho Matcher
 # =================================================================================
-def wasserstein_cost_matrix(out_bbox: torch.Tensor, tgt_bbox: torch.Tensor, eps: float = 1e-7, constant: float = 0.1) -> torch.Tensor:
+def wasserstein_cost_matrix(out_bbox: torch.Tensor, tgt_bbox: torch.Tensor, eps: float = 1e-7, constant: float = NWD_CONSTANT) -> torch.Tensor:
     """
     Tính ma trận NWD (Normalized Wasserstein Distance) giữa tất cả các box dự đoán và box GT.
     out_bbox: [N, 4] (cx, cy, w, h)

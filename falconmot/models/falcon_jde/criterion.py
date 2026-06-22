@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 
-from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
+from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou, NWD_CONSTANT
 from .matcher import HungarianMatcher
 from .feat_fusion import build_center_heatmaps, gaussian_focal_loss
 
@@ -97,7 +97,7 @@ class TripletLoss(nn.Module):
 
 
 
-def wasserstein_loss(pred, target, eps=1e-7, constant=0.1):
+def wasserstein_loss(pred, target, eps=1e-7, constant=NWD_CONSTANT):
     """
     Tính NWD cho Bounding Box đã được chuẩn hóa [0, 1] (cx, cy, w, h).
     constant=0.1 là hằng số nén phân phối Gauss trong không gian chuẩn hóa.
@@ -636,7 +636,8 @@ class FalconJDECriterion(nn.Module):
         else:
             # total = torch.exp(-self.s_det) * det_loss + self.s_det
             # total = det_loss
-            total = torch.exp(-self.s_det.detach()) * det_loss + self.s_det.detach()
+            # total = torch.exp(-self.s_det.detach()) * det_loss + self.s_det.detach()
+            total = 0.25 * det_loss
         total = total
 
         # Detached scalars for logging only.

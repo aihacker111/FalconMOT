@@ -16,7 +16,7 @@ class ModleWithLoss(torch.nn.Module):
         self.model = model
         self.loss = loss
 
-    def forward(self, batch):
+    def forward(self, batch, epoch: int = 0):
         outputs = self.model.forward(batch['pre_input'], batch['input'])
         loss, loss_stats = self.loss.forward(outputs=outputs, batch=batch)
         return outputs[-1], loss, loss_stats
@@ -131,7 +131,7 @@ class BaseTrainer(object):
             # Forward
             # ----------------------------------------------------------------
             with torch.amp.autocast('cuda', enabled=use_amp):
-                output, loss, loss_stats = model_with_loss.forward(batch)
+                output, loss, loss_stats = model_with_loss.forward(batch, epoch=epoch)
 
             loss = loss.mean()
 

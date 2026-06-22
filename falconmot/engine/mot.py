@@ -23,6 +23,9 @@ def _build_criterion(opt) -> FalconJDECriterion:
         use_focal_loss = True,
         alpha          = 0.25,
         gamma          = 2.0,
+        change_matcher       = True,   # bật IoU-aware (D-FINE/DEIM phase 2)
+        matcher_change_epoch = 3,      # 3 epoch đầu vẫn dùng Hungarian gốc cho ổn định
+        iou_order_alpha      = 0.5,
     )
 
     use_rep      = getattr(opt, 'rep', False)
@@ -95,7 +98,7 @@ class FalconJDEWithLoss(nn.Module):
             })
 
         outputs   = self.model(batch['input'], targets)
-        loss_dict = self.criterion(outputs, targets)
+        loss_dict = self.criterion(outputs, targets, epoch=epoch)
         return outputs, loss_dict['loss'], loss_dict
 
 
