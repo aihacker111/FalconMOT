@@ -125,6 +125,28 @@ class ConvNeXtV2Block(nn.Module):
 #         return self.out_bn(self.out(x))
 
 
+class SimAM(nn.Module):
+    """
+    Simple Parameter-Free Attention Module (SimAM).
+    0 tham số, tính toán trực tiếp năng lượng của từng nơ-ron (pixel).
+    Rất hiệu quả cho nhánh S4 (độ phân giải cao) để "tôn" các vật thể siêu nhỏ 
+    mà không làm phình FLOPs hay làm chậm tốc độ suy luận.
+    """
+    def __init__(self, e_lambda=1e-4):
+        super().__init__()
+        self.e_lambda = e_lambda
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.size()
+        n = w * h - 1
+        
+        # Tính độ lệch phương sai (energy)
+        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
+        
+        # Tăng cường feature map
+        return x * torch.sigmoid(y)
+
 
 class FeatFusion(nn.Module):
     """Nhánh kết hợp đặc trưng Stride-4 siêu nhẹ (Đã tối ưu FLOPs & VRAM).
@@ -149,6 +171,7 @@ class FeatFusion(nn.Module):
             nn.Sigmoid()
         )
 
+        self.simam = SimAM()
         # Giữ nguyên các block xử lý cốt lõi
         self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand) for _ in range(n_blocks)])
 
@@ -173,7 +196,7 @@ class FeatFusion(nn.Module):
         # 4. Gated Fusion dạng Nhân-Cộng (Element-wise Multiplication & Addition)
         # Loại bỏ hoàn toàn bước torch.cat -> Tiết kiệm bộ nhớ đệm VRAM tối đa
         x = (d * g) + s                                           
-        
+        x = self.simam(x)
         # 5. Đi qua các block tinh lọc đặc trưng và bung kênh đầu ra
         x = self.blocks(x)
         return self.out_norm(self.out(x))
