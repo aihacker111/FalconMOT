@@ -240,10 +240,13 @@ class MotTrainer(BaseTrainer):
         super().__init__(opt, model, optimizer=optimizer, **kwargs)
 
     def _get_losses(self, opt):
+        cls_loss = getattr(opt, 'cls_loss', 'mal')           # 'mal' | 'vfl' | 'focal'
+        cls_key  = {'mal': 'loss_mal', 'vfl': 'loss_vfl', 'focal': 'loss_cls'}[cls_loss]
+
         loss_states = ['loss', 'loss_det']
         if getattr(opt, 'use_reid', True) and getattr(opt, 'id_weight', 1.0) > 0:
             loss_states += ['loss_reid', 's_det', 's_id']
-        loss_states += ['loss_mal', 'loss_bbox', 'loss_giou']
+        loss_states += [cls_key, 'loss_bbox', 'loss_giou']    # <-- theo cls_loss, không hard-code
         if getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', False):
             loss_states.append('loss_s4_aux')
         if getattr(opt, 'rep', False):
