@@ -152,7 +152,7 @@ def _build_criterion(opt) -> FalconJDECriterion:
         use_focal_loss = True,
         alpha          = 0.25,
         gamma          = 2.0,
-        change_matcher       = True,   # bật IoU-aware (D-FINE/DEIM phase 2)
+        change_matcher       = False,   # bật IoU-aware (D-FINE/DEIM phase 2)
         matcher_change_epoch = 3,      # 3 epoch đầu vẫn dùng Hungarian gốc cho ổn định
         iou_order_alpha      = 0.5,
     )
@@ -165,7 +165,7 @@ def _build_criterion(opt) -> FalconJDECriterion:
     # DETR-style detection loss: loss_mal (DEIM) + loss_bbox + loss_giou
     weight_dict = {
         'loss_mal':  1.0,
-        'loss_vfl':  1.0,
+        'loss_vfl':  2.0,
         'loss_cls':  2.0,
         'loss_bbox': 5.0,
         'loss_giou': 2.0,
