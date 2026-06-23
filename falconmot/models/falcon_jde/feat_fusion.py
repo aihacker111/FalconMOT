@@ -457,66 +457,125 @@ class ConvNeXtV2Block(nn.Module):
 
 
 
-class FeatFusion(nn.Module):
-    """Nhánh kết hợp đặc trưng Stride-4 siêu nhẹ (Đã tối ưu FLOPs & VRAM).
+# class FeatFusion(nn.Module):
+#     """Nhánh kết hợp đặc trưng Stride-4 siêu nhẹ (Đã tối ưu FLOPs & VRAM).
     
-    Thay vì Concat + Conv 1x1 nặng nề, phiên bản này dùng ngữ nghĩa tầng sâu (S8) 
-    qua một bộ lọc Depthwise Spatial Gate để dập nhiễu nền trên tầng chi tiết (C1), 
-    sau đó thực hiện phép cộng (Element-wise Addition).
+#     Thay vì Concat + Conv 1x1 nặng nề, phiên bản này dùng ngữ nghĩa tầng sâu (S8) 
+#     qua một bộ lọc Depthwise Spatial Gate để dập nhiễu nền trên tầng chi tiết (C1), 
+#     sau đó thực hiện phép cộng (Element-wise Addition).
+#     """
+#     def __init__(self, c1_ch: int, hidden_dim: int,
+#                  mid_dim: int = None, n_blocks: int = 2, expand: float = 2.0):
+#         super().__init__()
+#         mid = mid_dim or hidden_dim // 2
+
+#         # Lớp giảm kênh (Projection) giữ nguyên
+#         self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)        # Chi tiết từ c1
+#         self.sem    = nn.Conv2d(hidden_dim, mid, 1, bias=False)   # Ngữ nghĩa từ S8
+
+#         # CẢI TIẾN 1: Thay thế Gate Concat bằng Depthwise Spatial Gate
+#         # Chỉ tốn mid * 3 * 3 tham số (cực kỳ ít) thay vì (mid * 2) * mid của Conv 1x1 cũ
+#         self.gate_spatial = nn.Sequential(
+#             nn.Conv2d(mid, mid, 3, padding=1, groups=mid, bias=True),
+#             nn.Sigmoid()
+#         )
+
+#         # CẢI TIẾN 3: scalar học được điều tiết mức bồi semantic vào detail.
+#         # init=1.0 -> ban đầu cân bằng (x = d + g*s); model tự dial lên/xuống.
+#         # (Muốn ép "pure-detail-first" thì init 0.0.)
+#         self.alpha = nn.Parameter(torch.tensor(1.0))
+
+#         # CẢI TIẾN 4: depthwise kernel 7x7 (đúng như docstring) -> receptive field
+#         # lớn ở S4 mà gần như không tốn thêm param/FLOP. Bù cho việc p2 không có
+#         # global context nào.
+#         self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand, k=7) for _ in range(n_blocks)])
+
+#         self.out    = nn.Conv2d(mid, hidden_dim, 1, bias=False)
+        
+#         # CẢI TIẾN 2: Đồng nhất sang LayerNorm2d thay vì BatchNorm2d
+#         # Giúp ổn định luồng gradient khi train với Batch Size nhỏ (2, 4, 8)
+#         self.out_norm = LayerNorm2d(hidden_dim)
+
+#     def forward(self, c1: torch.Tensor, s8: torch.Tensor) -> torch.Tensor:
+#         # 1. Trích xuất đặc trưng hình học và ngữ nghĩa về cùng số kênh `mid`
+#         d = self.detail(c1)                                       # [B, mid, H4, W4]
+#         s = self.sem(s8)                                          # [B, mid, H8, W8]
+        
+#         # 2. Nội suy S8 lên cùng độ phân giải với C1
+#         s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False) # [B, mid, H4, W4]
+        
+#         # 3. Sinh màng lọc (gate) từ Semantic S8 — nơi định vị vật thể tốt
+#         g = self.gate_spatial(s)                                  # [B, mid, H4, W4] trong (0, 1)
+
+#         # 4. CẢI TIẾN CỐT LÕI: detail (d) làm xương sống high-res, giữ cạnh sắc cho
+#         #    vật nhỏ; semantic (s, đã up-sample nên mờ) chỉ BỒI vào như residual có
+#         #    gate + scale alpha — thay vì cộng nguyên si làm loãng localization.
+#         #    Đây là dạng top-down kiểu FPN nhưng tối ưu cho object siêu nhỏ.
+#         x = d + self.alpha * (g * s)
+        
+#         # 5. Đi qua các block tinh lọc đặc trưng và bung kênh đầu ra
+#         x = self.blocks(x)
+#         return self.out_norm(self.out(x))
+
+
+
+class FeatFusion(nn.Module):
+    """Nhánh stride-4 (S4) — bản khử nhiễu cho small-object detection.
+ 
+    Khác bản cũ ở 3 điểm:
+      (1) Chuẩn hoá TỪNG nhánh trước khi trộn  -> hai luồng cùng thang độ,
+          ổn định với batch nhỏ (2/4/8). (Bản cũ cộng 2 conv 1x1 không norm.)
+      (2) Gate ĐÚNG CHIỀU: semantic S8 (sạch, đã upsample) làm NỀN; detail C1
+          (sắc nhưng nhiễu nền) chỉ được BỒI vào NƠI CÓ VẬT qua gate g.
+              x = s + alpha * (g * d)
+          g≈1 trên vật -> giữ cạnh sắc cho box nhỏ; g≈0 ở nền -> dập texture nhiễu.
+          (Bản cũ làm ngược: gate vào s, cộng d nguyên si -> không lọc được nền.)
+      (3) alpha PER-CHANNEL (thay vì 1 scalar) + tuỳ chọn nới `mid` để bớt
+          bóp kênh ở tầng quan trọng nhất.
     """
     def __init__(self, c1_ch: int, hidden_dim: int,
                  mid_dim: int = None, n_blocks: int = 2, expand: float = 2.0):
         super().__init__()
+        # GỢI Ý: truyền mid_dim=hidden_dim (không bóp 1/2) nếu VRAM cho phép.
         mid = mid_dim or hidden_dim // 2
-
-        # Lớp giảm kênh (Projection) giữ nguyên
-        self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)        # Chi tiết từ c1
-        self.sem    = nn.Conv2d(hidden_dim, mid, 1, bias=False)   # Ngữ nghĩa từ S8
-
-        # CẢI TIẾN 1: Thay thế Gate Concat bằng Depthwise Spatial Gate
-        # Chỉ tốn mid * 3 * 3 tham số (cực kỳ ít) thay vì (mid * 2) * mid của Conv 1x1 cũ
+ 
+        # --- projection + NORM cho TỪNG nhánh (điểm (1)) ---
+        self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)
+        self.sem    = nn.Conv2d(hidden_dim, mid, 1, bias=False)
+        self.detail_norm = LayerNorm2d(mid)
+        self.sem_norm    = LayerNorm2d(mid)
+ 
+        # --- gate objectness sinh từ SEMANTIC (depthwise 3x3, gần như free) ---
+        # bias init âm -> ban đầu gate nhỏ (~detail tắt) cho học ổn định, model tự mở.
         self.gate_spatial = nn.Sequential(
             nn.Conv2d(mid, mid, 3, padding=1, groups=mid, bias=True),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
-
-        # CẢI TIẾN 3: scalar học được điều tiết mức bồi semantic vào detail.
-        # init=1.0 -> ban đầu cân bằng (x = d + g*s); model tự dial lên/xuống.
-        # (Muốn ép "pure-detail-first" thì init 0.0.)
-        self.alpha = nn.Parameter(torch.tensor(1.0))
-
-        # CẢI TIẾN 4: depthwise kernel 7x7 (đúng như docstring) -> receptive field
-        # lớn ở S4 mà gần như không tốn thêm param/FLOP. Bù cho việc p2 không có
-        # global context nào.
-        self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand, k=7) for _ in range(n_blocks)])
-
-        self.out    = nn.Conv2d(mid, hidden_dim, 1, bias=False)
-        
-        # CẢI TIẾN 2: Đồng nhất sang LayerNorm2d thay vì BatchNorm2d
-        # Giúp ổn định luồng gradient khi train với Batch Size nhỏ (2, 4, 8)
+        nn.init.constant_(self.gate_spatial[0].bias, -1.0)
+ 
+        # --- alpha per-channel (điểm (3)); init nhỏ để "semantic-first" ---
+        self.alpha = nn.Parameter(torch.full((1, mid, 1, 1), 0.5))
+ 
+        # --- tinh lọc: ConvNeXtV2 DW7x7 + GRN (receptive field lớn, ít param) ---
+        self.blocks = nn.Sequential(
+            *[ConvNeXtV2Block(mid, expand, k=7) for _ in range(n_blocks)]
+        )
+ 
+        self.out      = nn.Conv2d(mid, hidden_dim, 1, bias=False)
         self.out_norm = LayerNorm2d(hidden_dim)
-
+ 
     def forward(self, c1: torch.Tensor, s8: torch.Tensor) -> torch.Tensor:
-        # 1. Trích xuất đặc trưng hình học và ngữ nghĩa về cùng số kênh `mid`
-        d = self.detail(c1)                                       # [B, mid, H4, W4]
-        s = self.sem(s8)                                          # [B, mid, H8, W8]
-        
-        # 2. Nội suy S8 lên cùng độ phân giải với C1
-        s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False) # [B, mid, H4, W4]
-        
-        # 3. Sinh màng lọc (gate) từ Semantic S8 — nơi định vị vật thể tốt
-        g = self.gate_spatial(s)                                  # [B, mid, H4, W4] trong (0, 1)
-
-        # 4. CẢI TIẾN CỐT LÕI: detail (d) làm xương sống high-res, giữ cạnh sắc cho
-        #    vật nhỏ; semantic (s, đã up-sample nên mờ) chỉ BỒI vào như residual có
-        #    gate + scale alpha — thay vì cộng nguyên si làm loãng localization.
-        #    Đây là dạng top-down kiểu FPN nhưng tối ưu cho object siêu nhỏ.
-        x = d + self.alpha * (g * s)
-        
-        # 5. Đi qua các block tinh lọc đặc trưng và bung kênh đầu ra
+        d = self.detail_norm(self.detail(c1))     # [B, mid, H4, W4] detail (sắc, nhiễu)
+        s = self.sem(s8)
+        s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False)
+        s = self.sem_norm(s)                       # [B, mid, H4, W4] semantic (sạch, mờ)
+ 
+        g = self.gate_spatial(s)                   # objectness prior từ semantic
+        # NỀN = semantic; BỒI detail vào NƠI CÓ VẬT -> dập nhiễu nền trên detail.
+        x = s + self.alpha * (g * d)
+ 
         x = self.blocks(x)
         return self.out_norm(self.out(x))
-
 
 class S4AuxiliaryHeadV2(nn.Module):
     """Head objectness nhẹ trên P2 (stride-4). Xuất logit 1 kênh (chưa sigmoid).
