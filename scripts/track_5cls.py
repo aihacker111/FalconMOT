@@ -473,7 +473,7 @@ class ECDetSequenceRunner5cls:
                         rx, ry = net_w / orig_w, net_h / orig_h
                         pad_w = pad_h = 0.0
                     self.tracker.set_dense(
-                        output['reid_dense'][0],            # [C,H,W]
+                        output['reid_dense'],            # [C,H,W]
                         stride=output['reid_dense_stride'],
                         ratio_x=rx, ratio_y=ry, pad_w=pad_w, pad_h=pad_h)
 
