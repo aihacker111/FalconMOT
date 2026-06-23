@@ -797,6 +797,10 @@ class FalconJDECriterion(nn.Module):
         Dùng để A/B với MAL khi gặp hiện tượng 1 box trùm 2 object:
         VFL giữ tương quan score<->IoU nhưng KHÔNG làm mềm target bằng ^gamma,
         nên confidence của box đúng sắc hơn -> ức chế trùng lặp mạnh hơn MAL.
+
+        LƯU Ý: dùng vfl_alpha RIÊNG (gốc Varifocal = 0.75), KHÔNG dùng chung
+        self.alpha với focal (focal = 0.25). alpha chỉ nhân nhánh NEGATIVE
+        (asymmetric weighting đặc trưng của VFL); positive weight = IoU thô.
         """
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
@@ -821,7 +825,8 @@ class FalconJDECriterion(nn.Module):
         target_score = target_score_o.unsqueeze(-1) * target          # IoU THÔ (KHÔNG .pow)
 
         pred_score = F.sigmoid(src_logits).detach()
-        weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
+        vfl_alpha  = 0.75                # gốc Varifocal = 0.75
+        weight = vfl_alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
 
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score,
                                                   weight=weight, reduction='none')
