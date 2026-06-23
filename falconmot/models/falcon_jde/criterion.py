@@ -1421,10 +1421,9 @@ class FalconJDECriterion(nn.Module):
         det_loss  = sum(v for k, v in losses.items() if k != 'loss_reid')
 
         if self.use_reid and self.id_weight > 0 and reid_loss is not None:
-            # total = (torch.exp(-self.s_det) * det_loss
-            #          + torch.exp(-self.s_id) * reid_loss
-            #          + (self.s_det + self.s_id))
-            total = det_loss + self.id_weight * reid_loss
+            total = (torch.exp(-self.s_det) * det_loss
+                     + torch.exp(-self.s_id) * reid_loss
+                     + (self.s_det + self.s_id))
         else:
             # total = torch.exp(-self.s_det) * det_loss + self.s_det
             total = det_loss
