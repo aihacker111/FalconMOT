@@ -791,6 +791,50 @@ class FalconJDECriterion(nn.Module):
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {'loss_cls': loss}
 
+    # def loss_labels_vfl(self, outputs, targets, indices, num_boxes, values=None):
+    #     """Varifocal Loss — target dương = IoU THÔ (KHÁC MAL: không .pow(gamma)).
+
+    #     Dùng để A/B với MAL khi gặp hiện tượng 1 box trùm 2 object:
+    #     VFL giữ tương quan score<->IoU nhưng KHÔNG làm mềm target bằng ^gamma,
+    #     nên confidence của box đúng sắc hơn -> ức chế trùng lặp mạnh hơn MAL.
+
+    #     LƯU Ý: dùng vfl_alpha RIÊNG (gốc Varifocal = 0.75), KHÔNG dùng chung
+    #     self.alpha với focal (focal = 0.25). alpha chỉ nhân nhánh NEGATIVE
+    #     (asymmetric weighting đặc trưng của VFL); positive weight = IoU thô.
+    #     """
+    #     assert 'pred_boxes' in outputs
+    #     idx = self._get_src_permutation_idx(indices)
+    #     if values is None:
+    #         src_boxes = outputs['pred_boxes'][idx]
+    #         tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+    #         ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes.detach()),
+    #                           box_cxcywh_to_xyxy(tgt_boxes))
+    #         ious = torch.diag(ious).detach()
+    #     else:
+    #         ious = values
+
+    #     src_logits = outputs['pred_logits']
+    #     target_classes_o = torch.cat([t['labels'][J] for t, (_, J) in zip(targets, indices)])
+    #     target_classes = torch.full(src_logits.shape[:2], self.num_classes,
+    #                                 dtype=torch.int64, device=src_logits.device)
+    #     target_classes[idx] = target_classes_o
+    #     target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
+
+    #     target_score_o = torch.zeros_like(target_classes, dtype=src_logits.dtype)
+    #     target_score_o[idx] = ious.to(target_score_o.dtype)
+    #     target_score = target_score_o.unsqueeze(-1) * target          # IoU THÔ (KHÔNG .pow)
+
+    #     pred_score = F.sigmoid(src_logits).detach()
+    #     vfl_alpha  = 0.75                # gốc Varifocal = 0.75
+    #     weight = vfl_alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
+
+    #     loss = F.binary_cross_entropy_with_logits(src_logits, target_score,
+    #                                               weight=weight, reduction='none')
+    #     loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
+    #     return {'loss_vfl': loss}
+    
+
+
     def loss_labels_vfl(self, outputs, targets, indices, num_boxes, values=None):
         """Varifocal Loss — target dương = IoU THÔ (KHÁC MAL: không .pow(gamma)).
 
@@ -804,12 +848,25 @@ class FalconJDECriterion(nn.Module):
         """
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
+        
         if values is None:
             src_boxes = outputs['pred_boxes'][idx]
             tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-            ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes.detach()),
-                              box_cxcywh_to_xyxy(tgt_boxes))
-            ious = torch.diag(ious).detach()
+            
+            # [TỐI ƯU 1]: Tính Element-wise IoU (1-1) để tiết kiệm O(N^2) bộ nhớ
+            src_boxes_xyxy = box_cxcywh_to_xyxy(src_boxes.detach())
+            tgt_boxes_xyxy = box_cxcywh_to_xyxy(tgt_boxes)
+            
+            lt = torch.max(src_boxes_xyxy[:, :2], tgt_boxes_xyxy[:, :2])
+            rb = torch.min(src_boxes_xyxy[:, 2:], tgt_boxes_xyxy[:, 2:])
+            wh = (rb - lt).clamp(min=0)
+            inter = wh[:, 0] * wh[:, 1]
+            
+            area_src = (src_boxes_xyxy[:, 2] - src_boxes_xyxy[:, 0]) * (src_boxes_xyxy[:, 3] - src_boxes_xyxy[:, 1])
+            area_tgt = (tgt_boxes_xyxy[:, 2] - tgt_boxes_xyxy[:, 0]) * (tgt_boxes_xyxy[:, 3] - tgt_boxes_xyxy[:, 1])
+            union = area_src + area_tgt - inter
+            
+            ious = (inter / union).detach()
         else:
             ious = values
 
@@ -824,13 +881,17 @@ class FalconJDECriterion(nn.Module):
         target_score_o[idx] = ious.to(target_score_o.dtype)
         target_score = target_score_o.unsqueeze(-1) * target          # IoU THÔ (KHÔNG .pow)
 
-        pred_score = F.sigmoid(src_logits).detach()
+        # [TỐI ƯU 2]: Thay thế F.sigmoid (deprecated API) bằng method .sigmoid() của Tensor
+        pred_score = src_logits.sigmoid().detach()
         vfl_alpha  = 0.75                # gốc Varifocal = 0.75
         weight = vfl_alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
 
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score,
-                                                  weight=weight, reduction='none')
-        loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
+                                                weight=weight, reduction='none')
+        
+        # [TỐI ƯU 3]: Rút gọn thao tác reduction, bỏ phép nhân/chia dư thừa qua shape
+        loss = loss.sum() / num_boxes
+        
         return {'loss_vfl': loss}
 
     def loss_labels_mal(self, outputs, targets, indices, num_boxes, values=None):
