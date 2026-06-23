@@ -7,3 +7,4 @@ Archive.zip
 test_images
 out
 model_best.pth
+model_last.pth
