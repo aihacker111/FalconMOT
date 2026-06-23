@@ -165,6 +165,8 @@ def _build_criterion(opt) -> FalconJDECriterion:
     # DETR-style detection loss: loss_mal (DEIM) + loss_bbox + loss_giou
     weight_dict = {
         'loss_mal':  1.0,
+        'loss_vfl':  1.0,
+        'loss_cls':  2.0,
         'loss_bbox': 5.0,
         'loss_giou': 2.0,
     }
@@ -173,7 +175,8 @@ def _build_criterion(opt) -> FalconJDECriterion:
     if use_rep:
         weight_dict['loss_rep'] = rep_weight
 
-    base_losses = ['mal', 'boxes']   # DEIM MAL thay cho focal
+    cls_loss = getattr(opt, 'cls_loss', 'mal')   # 'mal' | 'vfl' | 'focal'
+    base_losses = [cls_loss, 'boxes']   # DEIM MAL thay cho focal
     if use_rep:
         base_losses.append('rep')
     if use_s4_aux:

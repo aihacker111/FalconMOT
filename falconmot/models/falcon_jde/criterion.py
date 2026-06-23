@@ -733,6 +733,7 @@ class FalconJDECriterion(nn.Module):
         self.w_cons     = w_cons
         self.weight_dict = weight_dict or {
             'loss_mal':  1.0,
+            'loss_vfl':  1.0,
             'loss_bbox': 5.0,
             'loss_giou': 2.0,
             'loss_s4_aux': 1.0
@@ -789,6 +790,43 @@ class FalconJDECriterion(nn.Module):
             src_logits, target, self.alpha, self.gamma, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {'loss_cls': loss}
+
+    def loss_labels_vfl(self, outputs, targets, indices, num_boxes, values=None):
+        """Varifocal Loss — target dương = IoU THÔ (KHÁC MAL: không .pow(gamma)).
+
+        Dùng để A/B với MAL khi gặp hiện tượng 1 box trùm 2 object:
+        VFL giữ tương quan score<->IoU nhưng KHÔNG làm mềm target bằng ^gamma,
+        nên confidence của box đúng sắc hơn -> ức chế trùng lặp mạnh hơn MAL.
+        """
+        assert 'pred_boxes' in outputs
+        idx = self._get_src_permutation_idx(indices)
+        if values is None:
+            src_boxes = outputs['pred_boxes'][idx]
+            tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
+            ious, _ = box_iou(box_cxcywh_to_xyxy(src_boxes.detach()),
+                              box_cxcywh_to_xyxy(tgt_boxes))
+            ious = torch.diag(ious).detach()
+        else:
+            ious = values
+
+        src_logits = outputs['pred_logits']
+        target_classes_o = torch.cat([t['labels'][J] for t, (_, J) in zip(targets, indices)])
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
+                                    dtype=torch.int64, device=src_logits.device)
+        target_classes[idx] = target_classes_o
+        target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
+
+        target_score_o = torch.zeros_like(target_classes, dtype=src_logits.dtype)
+        target_score_o[idx] = ious.to(target_score_o.dtype)
+        target_score = target_score_o.unsqueeze(-1) * target          # IoU THÔ (KHÔNG .pow)
+
+        pred_score = F.sigmoid(src_logits).detach()
+        weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
+
+        loss = F.binary_cross_entropy_with_logits(src_logits, target_score,
+                                                  weight=weight, reduction='none')
+        loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
+        return {'loss_vfl': loss}
 
     def loss_labels_mal(self, outputs, targets, indices, num_boxes, values=None):
         """DEIM Matchability-Aware Loss (thay cho focal) — port nguyên từ repo DEIM.
@@ -1162,6 +1200,7 @@ class FalconJDECriterion(nn.Module):
         loss_map = {
             'focal': self.loss_labels_focal,   # -> loss_cls (giữ lại để A/B)
             'mal':   self.loss_labels_mal,     # -> loss_mal (DEIM, mặc định)
+            'vfl':   self.loss_labels_vfl,
             'boxes': self.loss_boxes,          # -> loss_bbox + loss_giou
             's4_aux': self.loss_s4_aux
         }

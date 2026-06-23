@@ -538,6 +538,10 @@ class opts(object):
                                  help='enable S4 auxiliary heatmap loss (mặc định TẮT: trùng enc_score_head)')
         self.parser.add_argument('--no_s4_aux', dest='use_s4_aux', action='store_false',
                                  help='disable S4 auxiliary loss/head; no aux gradient')
+        
+        self.parser.add_argument('--cls_loss', default='mal',
+                             choices=['mal', 'vfl', 'focal'],
+                             help="Classification loss: mal (DEIM), vfl (target IoU thô), focal")
         # ── Gộp train + val thành một tập train ──────────────────────────
         self.parser.add_argument('--merge_val_into_train', action='store_true', default=False,
                                  help='Gộp cả train_ann/img và val_ann/img (từ data_cfg) vào '
