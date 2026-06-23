@@ -678,17 +678,7 @@ class TripletLoss(nn.Module):
             return inputs.sum() * 0
         y = torch.ones_like(dist_an)
         return self.ranking_loss(dist_an, dist_ap, y)
-
-@staticmethod
-def _sample_emb_map(emb_map_b: torch.Tensor, centers_xy: torch.Tensor) -> torch.Tensor:
-    """Bilinear-sample emb_map [D,H,W] tại các tâm GT (cx,cy ∈ [0,1]) -> [n, D]."""
-    D = emb_map_b.shape[0]
-    if centers_xy.numel() == 0:
-        return emb_map_b.new_zeros((0, D))
-    grid = (centers_xy * 2.0 - 1.0).view(1, -1, 1, 2)   # grid_sample: (x,y) ∈ [-1,1]
-    s = F.grid_sample(emb_map_b.unsqueeze(0), grid,
-                      mode='bilinear', align_corners=False)   # [1, D, n, 1]
-    return s.view(D, -1).t().contiguous()                     # [n, D]
+                  # [n, D]
 # ---------------------------------------------------------------------------
 # Main criterion
 # ---------------------------------------------------------------------------
@@ -977,6 +967,19 @@ class FalconJDECriterion(nn.Module):
     #     if n_active > 1:
     #         reid_loss = reid_loss / n_active
     #     return {'loss_reid': reid_loss}
+
+
+    @staticmethod
+    def _sample_emb_map(emb_map_b: torch.Tensor, centers_xy: torch.Tensor) -> torch.Tensor:
+        """Bilinear-sample emb_map [D,H,W] tại các tâm GT (cx,cy ∈ [0,1]) -> [n, D]."""
+        D = emb_map_b.shape[0]
+        if centers_xy.numel() == 0:
+            return emb_map_b.new_zeros((0, D))
+        grid = (centers_xy * 2.0 - 1.0).view(1, -1, 1, 2)   # grid_sample: (x,y) ∈ [-1,1]
+        s = F.grid_sample(emb_map_b.unsqueeze(0), grid,
+                        mode='bilinear', align_corners=False)   # [1, D, n, 1]
+        return s.view(D, -1).t().contiguous()   
+
     def loss_reid(self, outputs, targets, indices) -> dict:
         """ReID loss per-class (CE + Triplet) + DENSE alignment.
     
