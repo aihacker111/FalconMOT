@@ -657,7 +657,7 @@ class opts(object):
         self.parser.add_argument('--s_det_init', type=float, default=2.5,
                                  help='init for uncertainty weight s_det ≈ log(initial loss_det). '
                                       'Read first-iter loss_det from the log and set log() of it.')
-        self.parser.add_argument('--s_id_init', type=float, default=1.85,
+        self.parser.add_argument('--s_id_init', type=float, default=2.25,
                                  help='init for uncertainty weight s_id ≈ log(initial loss_reid).')
 
         # ── Sequence-aware augmentation ────────────────────────────────────
@@ -683,6 +683,14 @@ class opts(object):
                                  help='probability of using homography instead of affine')
         self.parser.add_argument('--homography_strength', type=float, default=0.12,
                                  help='corner-jitter fraction of image size (0.08-0.15 sane)')
+        self.parser.add_argument('--obj_occlusion', action='store_true', default=True)
+        self.parser.add_argument('--no_obj_occlusion', dest='obj_occlusion', action='store_false')
+        self.parser.add_argument('--obj_occ_prob', type=float, default=0.5)
+        self.parser.add_argument('--obj_occ_frac', type=float, default=0.3)
+        self.parser.add_argument('--obj_occ_mode', type=str,   default='patch',
+                            choices=['patch', 'random', 'mean'])
+        self.parser.add_argument('--random_erasing', action='store_true')
+        self.parser.add_argument('--re_prob', type=float, default=0.25)
         # ── ReID ───────────────────────────────────────────────────────────
         self.parser.add_argument('--reid_dim', type=int, default=128)
         self.parser.add_argument('--reid_cls_ids', default='0,1,2,3,4,5,6,7,8,9')
@@ -793,7 +801,10 @@ class opts(object):
                                  help='filter boxes smaller than this area (px²)')
         self.parser.add_argument('--test_visdrone', default=True)
         self.parser.add_argument('--test_uavdt',    default=False)
-
+        self.parser.add_argument('--reid_use_s4_dense', action='store_true',
+                      help='Dense ReID map ở stride-4 (object nhỏ). Cần c1=_s4_feat.')
+        self.parser.add_argument('--reid_w_dense_ce', type=float, default=0.5)
+        self.parser.add_argument('--reid_w_cons',     type=float, default=0.1)
         # ── Distributed ────────────────────────────────────────────────────
         self.parser.add_argument('--local-rank', type=int, default=0)
 

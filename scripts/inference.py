@@ -31,8 +31,8 @@ VISDRONE_CLASSES = [
     "pedestrian",
     "bicycle",
     "car",
+    "van",
     "truck",
-    "tricycle",
     "bus",
     "motor",
 ]

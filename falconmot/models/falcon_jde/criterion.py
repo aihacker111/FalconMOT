@@ -679,7 +679,16 @@ class TripletLoss(nn.Module):
         y = torch.ones_like(dist_an)
         return self.ranking_loss(dist_an, dist_ap, y)
 
-
+@staticmethod
+def _sample_emb_map(emb_map_b: torch.Tensor, centers_xy: torch.Tensor) -> torch.Tensor:
+    """Bilinear-sample emb_map [D,H,W] tại các tâm GT (cx,cy ∈ [0,1]) -> [n, D]."""
+    D = emb_map_b.shape[0]
+    if centers_xy.numel() == 0:
+        return emb_map_b.new_zeros((0, D))
+    grid = (centers_xy * 2.0 - 1.0).view(1, -1, 1, 2)   # grid_sample: (x,y) ∈ [-1,1]
+    s = F.grid_sample(emb_map_b.unsqueeze(0), grid,
+                      mode='bilinear', align_corners=False)   # [1, D, n, 1]
+    return s.view(D, -1).t().contiguous()                     # [n, D]
 # ---------------------------------------------------------------------------
 # Main criterion
 # ---------------------------------------------------------------------------
@@ -711,6 +720,8 @@ class FalconJDECriterion(nn.Module):
         s_det_init:          float = 2.5,
         s_id_init:           float = 1.85,
         mal_alpha:           float = None,
+        w_dense_ce: float = 0.5,     
+        w_cons: float = 0.1
     ):
         super().__init__()
         self.matcher             = matcher
@@ -728,7 +739,8 @@ class FalconJDECriterion(nn.Module):
         self.use_triplet         = use_triplet
         self.use_arcface         = use_arcface
         self.mal_alpha           = mal_alpha   # DEIM MAL: hệ số trọng số nhánh negative (None = theo repo gốc)
-
+        self.w_dense_ce = w_dense_ce
+        self.w_cons     = w_cons
         self.weight_dict = weight_dict or {
             'loss_mal':  1.0,
             'loss_bbox': 5.0,
@@ -889,31 +901,108 @@ class FalconJDECriterion(nn.Module):
     # ReID loss
     # ------------------------------------------------------------------
 
+    # def loss_reid(self, outputs, targets, indices) -> dict:
+    #     """Per-class ReID loss on the queries matched to ground-truth objects.
+
+    #     Two representations come from the head (BNNeck principle):
+    #       • ``pred_reid``     — post-neck embedding → CE / ArcFace + inference
+    #       • ``pred_reid_raw`` — pre-neck embedding  → TripletLoss
+
+    #     For the (recommended) plain-CE path we follow FairMOT / AMOT exactly:
+    #     scale * L2-normalize the embedding, then a per-class linear classifier.
+    #     Inference L2-normalizes the *same* post-neck vector, so the direction
+    #     CE optimises is the direction the tracker matches on (cosine).
+    #     """
+    #     if 'pred_reid' not in outputs:
+    #         return {}
+
+    #     pred_reid = outputs['pred_reid']                          # (B, N, D) post-neck
+    #     pred_reid_raw = outputs.get('pred_reid_raw', pred_reid)   # (B, N, D) pre-neck
+    #     dev = pred_reid.device
+    #     reid_loss = pred_reid.sum() * 0.0
+
+    #     # Gather matched embeddings per ReID class.
+    #     cls_emb     = {cid: [] for cid in self.nid_dict}   # post-neck (CE)
+    #     cls_emb_raw = {cid: [] for cid in self.nid_dict}   # pre-neck  (triplet)
+    #     cls_ids     = {cid: [] for cid in self.nid_dict}
+
+    #     for b_idx, (src_idx, tgt_idx) in enumerate(indices):
+    #         if len(src_idx) == 0:
+    #             continue
+    #         t       = targets[b_idx]
+    #         src_idx = src_idx.to(dev)
+    #         tgt_idx = tgt_idx.to(dev)
+    #         labels  = t['labels'].to(dev)[tgt_idx]
+    #         tids    = t['track_ids'].to(dev)[tgt_idx]
+    #         valid   = tids >= 0
+    #         if not valid.any():
+    #             continue
+
+    #         src_v   = src_idx[valid]
+    #         emb_b   = pred_reid[b_idx][src_v]
+    #         emb_b_r = pred_reid_raw[b_idx][src_v]
+    #         lbl_b   = labels[valid]
+    #         ids_b   = tids[valid]
+
+    #         for cls_id in self.nid_dict:
+    #             mask = (lbl_b == cls_id)
+    #             if not mask.any():
+    #                 continue
+    #             cls_emb[cls_id].append(emb_b[mask])
+    #             cls_emb_raw[cls_id].append(emb_b_r[mask])
+    #             cls_ids[cls_id].append(ids_b[mask])
+
+    #     n_active = 0
+    #     for cls_id in self.nid_dict:
+    #         if not cls_emb[cls_id]:
+    #             continue
+    #         emb     = torch.cat(cls_emb[cls_id], dim=0)        # (n, D) post-neck
+    #         emb_raw = torch.cat(cls_emb_raw[cls_id], dim=0)    # (n, D) pre-neck
+    #         ids     = torch.cat(cls_ids[cls_id], dim=0)        # (n,)
+
+    #         # ---- classification (ID) loss ----
+    #         if self.use_arcface:
+    #             logits = self.classifiers[str(cls_id)](emb, ids)   # ArcFace normalizes internally
+    #         else:
+    #             emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
+    #             logits = self.linear_classifiers[str(cls_id)](emb_id)
+    #         reid_loss = reid_loss + self.ce_loss(logits, ids)
+
+    #         # ---- optional metric (triplet) loss on the un-normalized vector ----
+    #         if self.use_triplet and emb_raw.shape[0] >= 2:
+    #             reid_loss = reid_loss + self.triplet(emb_raw, ids)
+
+    #         n_active += 1
+
+    #     if n_active > 1:
+    #         reid_loss = reid_loss / n_active
+    #     return {'loss_reid': reid_loss}
     def loss_reid(self, outputs, targets, indices) -> dict:
-        """Per-class ReID loss on the queries matched to ground-truth objects.
-
-        Two representations come from the head (BNNeck principle):
-          • ``pred_reid``     — post-neck embedding → CE / ArcFace + inference
-          • ``pred_reid_raw`` — pre-neck embedding  → TripletLoss
-
-        For the (recommended) plain-CE path we follow FairMOT / AMOT exactly:
-        scale * L2-normalize the embedding, then a per-class linear classifier.
-        Inference L2-normalizes the *same* post-neck vector, so the direction
-        CE optimises is the direction the tracker matches on (cosine).
+        """ReID loss per-class (CE + Triplet) + DENSE alignment.
+    
+        Sparse:
+        • pred_reid     (post-neck) -> CE (linear_classifier sau emb_scale * L2-norm)
+        • pred_reid_raw (pre-neck)  -> TripletLoss
+        Dense (MỚI, chỉ khi có pred_reid_map):
+        • lấy emb_map tại TÂM GT thật -> qua CHÍNH linear_classifier đó -> CE
+            => cấp tín hiệu identity cho pixel đúng vị trí + kéo dense về cùng metric.
+        • consistency: vector dense tại tâm GT kéo về emb sparse của chính instance
+            (cosine; sparse.detach() làm teacher để ổn định).
         """
         if 'pred_reid' not in outputs:
             return {}
-
-        pred_reid = outputs['pred_reid']                          # (B, N, D) post-neck
-        pred_reid_raw = outputs.get('pred_reid_raw', pred_reid)   # (B, N, D) pre-neck
+    
+        pred_reid     = outputs['pred_reid']                       # (B,N,D) post-neck
+        pred_reid_raw = outputs.get('pred_reid_raw', pred_reid)    # (B,N,D) pre-neck
+        pred_reid_map = outputs.get('pred_reid_map', None)         # (B,D,H,W) hoặc None
         dev = pred_reid.device
         reid_loss = pred_reid.sum() * 0.0
-
-        # Gather matched embeddings per ReID class.
-        cls_emb     = {cid: [] for cid in self.nid_dict}   # post-neck (CE)
-        cls_emb_raw = {cid: [] for cid in self.nid_dict}   # pre-neck  (triplet)
-        cls_ids     = {cid: [] for cid in self.nid_dict}
-
+    
+        cls_emb       = {cid: [] for cid in self.nid_dict}   # post-neck (CE)
+        cls_emb_raw   = {cid: [] for cid in self.nid_dict}   # pre-neck  (triplet)
+        cls_emb_dense = {cid: [] for cid in self.nid_dict}   # dense (CE + consistency)
+        cls_ids       = {cid: [] for cid in self.nid_dict}
+    
         for b_idx, (src_idx, tgt_idx) in enumerate(indices):
             if len(src_idx) == 0:
                 continue
@@ -925,13 +1014,18 @@ class FalconJDECriterion(nn.Module):
             valid   = tids >= 0
             if not valid.any():
                 continue
-
+    
             src_v   = src_idx[valid]
             emb_b   = pred_reid[b_idx][src_v]
             emb_b_r = pred_reid_raw[b_idx][src_v]
             lbl_b   = labels[valid]
             ids_b   = tids[valid]
-
+    
+            dense_b = None
+            if pred_reid_map is not None:
+                centers = t['boxes'].to(dev)[tgt_idx][valid][:, :2]    # (cx,cy) ∈ [0,1]
+                dense_b = self._sample_emb_map(pred_reid_map[b_idx], centers)   # [n, D]
+    
             for cls_id in self.nid_dict:
                 mask = (lbl_b == cls_id)
                 if not mask.any():
@@ -939,29 +1033,45 @@ class FalconJDECriterion(nn.Module):
                 cls_emb[cls_id].append(emb_b[mask])
                 cls_emb_raw[cls_id].append(emb_b_r[mask])
                 cls_ids[cls_id].append(ids_b[mask])
-
+                if dense_b is not None:
+                    cls_emb_dense[cls_id].append(dense_b[mask])
+    
         n_active = 0
         for cls_id in self.nid_dict:
             if not cls_emb[cls_id]:
                 continue
-            emb     = torch.cat(cls_emb[cls_id], dim=0)        # (n, D) post-neck
-            emb_raw = torch.cat(cls_emb_raw[cls_id], dim=0)    # (n, D) pre-neck
-            ids     = torch.cat(cls_ids[cls_id], dim=0)        # (n,)
-
-            # ---- classification (ID) loss ----
+            emb     = torch.cat(cls_emb[cls_id], dim=0)        # (n, D)
+            emb_raw = torch.cat(cls_emb_raw[cls_id], dim=0)
+            ids     = torch.cat(cls_ids[cls_id], dim=0)
+    
+            # ---- sparse classification (ID) loss ----
             if self.use_arcface:
-                logits = self.classifiers[str(cls_id)](emb, ids)   # ArcFace normalizes internally
+                logits = self.classifiers[str(cls_id)](emb, ids)
             else:
                 emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
                 logits = self.linear_classifiers[str(cls_id)](emb_id)
             reid_loss = reid_loss + self.ce_loss(logits, ids)
-
-            # ---- optional metric (triplet) loss on the un-normalized vector ----
+    
+            # ---- sparse triplet (pre-neck, Euclidean tự do) ----
             if self.use_triplet and emb_raw.shape[0] >= 2:
                 reid_loss = reid_loss + self.triplet(emb_raw, ids)
-
+    
+            # ---- DENSE: CE qua CHÍNH classifier + consistency về sparse ----
+            if cls_emb_dense[cls_id]:
+                dense = torch.cat(cls_emb_dense[cls_id], dim=0)     # (n, D)
+                if self.use_arcface:
+                    logits_d = self.classifiers[str(cls_id)](dense, ids)
+                else:
+                    emb_id_d = self.emb_scale_dict[cls_id] * F.normalize(dense, dim=1)
+                    logits_d = self.linear_classifiers[str(cls_id)](emb_id_d)
+                reid_loss = reid_loss + self.w_dense_ce * self.ce_loss(logits_d, ids)
+    
+                cons = 1.0 - (F.normalize(dense, dim=1)
+                            * F.normalize(emb.detach(), dim=1)).sum(dim=1)
+                reid_loss = reid_loss + self.w_cons * cons.mean()
+    
             n_active += 1
-
+    
         if n_active > 1:
             reid_loss = reid_loss / n_active
         return {'loss_reid': reid_loss}

@@ -520,7 +520,10 @@ from .backbone import DINOv3STAs
 from .hybrid_encoder import HybridEncoder
 from .decoder import DEIMTransformer
 from .dfine_decoder import MSDeformableAttention
-from .feat_fusion import FeatFusion, S4AuxiliaryHeadV2
+# from .feat_fusion import FeatFusion, S4AuxiliaryHeadV2
+from .feat_fusion import (
+    FeatFusion, S4AuxiliaryHeadV2, ConvNeXtV2Block, LayerNorm2d,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -549,138 +552,208 @@ def grad_scale(x: torch.Tensor, scale: float) -> torch.Tensor:
     return _GradScale.apply(x, scale)
 
 
-def _largest_divisor(dim: int, candidates=(8, 6, 4, 3, 2, 1)) -> int:
-    """Pick the largest head-count in `candidates` that divides `dim`."""
+def _largest_divisor(dim, candidates=(8, 6, 4, 3, 2, 1)):
     for c in candidates:
         if dim % c == 0:
             return c
     return 1
-
-
-class ReIDHead(nn.Module):
-    """Appearance ReID head for a query-based (DETR / D-FINE) JDE tracker.
-
-    Pipeline
-    --------
-    Each object query is a *pointer* saying WHERE to look; the appearance
-    *content* is read from the shared feature map by deformable attention:
-
-        query (detached) ─┐
-                          ├─► deform-attn(sample feat at box) ─► appearance
-        box   (detached) ─┘                                          │
-        query (detached) ───────────────────────────────────────────┤
-                                                                     ▼
-                                            fuse([query, appearance]) → emb_raw
-                                                                     │
-                                              LayerNorm neck (LNNeck)│
-                                                                     ▼
-                                                                    emb
-
-    Gradient policy (set by the model, not here):
-      • `query` and `box` arrive **detached** → pointers only, so the decoder's
-        localisation / classification semantics are shielded from ReID gradient.
-      • `feat` arrives **connected** → appearance gradient flows into the
-        encoder / backbone, giving the shared trunk identity-aware features
-        (the "joint" coupling of JDE). Detection vs ReID are balanced later by
-        learnable uncertainty weights in the criterion.
-
-    Dual output (BNNeck principle) keeps the two ReID objectives from fighting
-    over one vector:
-      • ``emb_raw`` (pre-neck)  → TripletLoss  (free Euclidean space)
-      • ``emb``     (post-neck) → CE / ArcFace + inference (stable manifold)
-
-    A per-sample LayerNorm neck is used instead of BatchNorm because the number
-    of matched objects per image varies a lot in DETR-style training, which
-    makes batch statistics unreliable.
+ 
+ 
+class DenseReIDHead(nn.Module):
+    """ReID head trả về CẢ embedding thưa LẪN emb_map dày (cùng không gian).
+ 
+    LITE: dense_tower có bottleneck (dense_width) để giữ FLOP ~6 GFLOP ở stride-4.
     """
-
-    def __init__(self, hidden_dim: int, reid_dim: int,
-                 num_heads: int = 8, num_points: int = 8):
+ 
+    def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
+                 use_s4_dense=False, s4_in_ch=None,
+                 dense_width=96, n_dense_blocks=2, dense_expand=1.5):
         super().__init__()
-        if hidden_dim % num_heads != 0:
-            num_heads = _largest_divisor(hidden_dim)
-        self.hidden_dim = hidden_dim
-        self.num_heads  = num_heads
-
-        # --- appearance sampling (single-scale deformable attention) ---
-        self.value_proj  = nn.Linear(hidden_dim, hidden_dim)
+        nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
+        self.hidden_dim   = hidden_dim
+        self.reid_dim     = reid_dim
+        self.num_heads    = nh
+        self.use_s4_dense = bool(use_s4_dense and s4_in_ch is not None)
+ 
+        # (a) chỉ fuse khi reid_feat CHƯA ở stride-4 (use_s4=False). use_s4=True -> bỏ.
+        if self.use_s4_dense:
+            self.s4_fuse = FeatFusion(s4_in_ch, hidden_dim, n_blocks=1)
+ 
+        # (b) dense tower với BOTTLENECK width -> rẻ
+        tower = []
+        if dense_width != hidden_dim:
+            tower.append(nn.Conv2d(hidden_dim, dense_width, 1, bias=False))
+        tower += [ConvNeXtV2Block(dense_width, expand=dense_expand, k=7)
+                  for _ in range(n_dense_blocks)]
+        tower.append(nn.Conv2d(dense_width, reid_dim, 1, bias=False))
+        self.dense_tower = nn.Sequential(*tower)
+        self.dense_neck  = LayerNorm2d(reid_dim)
+ 
+        # (c) sparse path (rẻ: chỉ N=300 query) — KHÔNG đổi
+        self.q_proj      = nn.Linear(hidden_dim, reid_dim)
+        self.value_proj  = nn.Linear(reid_dim, reid_dim)
         self.deform_attn = MSDeformableAttention(
-            embed_dim=hidden_dim, num_heads=num_heads,
+            embed_dim=reid_dim, num_heads=nh,
             num_levels=1, num_points=num_points, method='default',
         )
-        self.norm_q    = nn.LayerNorm(hidden_dim)
-        self.norm_attn = nn.LayerNorm(hidden_dim)
-
-        # --- fuse [query, appearance] -> reid embedding ---
+        self.norm_q    = nn.LayerNorm(reid_dim)
+        self.norm_attn = nn.LayerNorm(reid_dim)
         self.fuse = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(hidden_dim + reid_dim, reid_dim),
             nn.SiLU(inplace=True),
-            nn.Linear(hidden_dim, reid_dim),
+            nn.Linear(reid_dim, reid_dim),
         )
-
-        # --- LNNeck: per-sample normalisation, batch-size independent ---
-        # affine=False keeps the vector on a stable manifold for cosine / CE
-        # and does not distort the sphere used by the angular objective.
         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
-
-    def _build_value(self, feat: torch.Tensor):
-        """feat [B,C,H,W] -> (value_list, spatial_shapes) for MSDeformableAttention.
-
-        Produces value[0] of shape [B, n_head, head_dim, H*W], which is the
-        layout expected by `deformable_attention_core_func_v2` (value_shape
-        'default').
-        """
-        B, C, H, W = feat.shape
-        v = feat.flatten(2).permute(0, 2, 1)          # [B, HW, C]
-        v = self.value_proj(v)                        # [B, HW, C]
-        head_dim = C // self.num_heads
-        v = v.reshape(B, H * W, self.num_heads, head_dim)
-        v = v.permute(0, 2, 3, 1).contiguous()        # [B, n_head, head_dim, HW]
+ 
+    def build_emb_map(self, reid_feat, c1=None):
+        x = reid_feat
+        if self.use_s4_dense and c1 is not None:
+            x = self.s4_fuse(c1, reid_feat)
+        return self.dense_neck(self.dense_tower(x))
+ 
+    def _build_value(self, emb_map):
+        B, C, H, W = emb_map.shape
+        v = self.value_proj(emb_map.flatten(2).permute(0, 2, 1))
+        hd = C // self.num_heads
+        v = v.reshape(B, H * W, self.num_heads, hd).permute(0, 2, 3, 1).contiguous()
         return [v], [[H, W]]
+ 
+    def forward(self, query, boxes, reid_feat, c1=None, return_dense=False):
+        emb_map = self.build_emb_map(reid_feat, c1)
+        value_list, spatial_shapes = self._build_value(emb_map)
+        q_in = self.norm_q(self.q_proj(query))
+        app  = self.norm_attn(self.deform_attn(q_in, boxes.unsqueeze(2),
+                                               value_list, spatial_shapes))
+        emb_raw = self.fuse(torch.cat([query, app], dim=-1))
+        out = {'emb': self.neck(emb_raw), 'emb_raw': emb_raw}
+        if return_dense:
+            out['emb_map'] = emb_map
+        return out
 
-    @torch.no_grad()
-    def dense_appearance(self, feat: torch.Tensor) -> torch.Tensor:
-        """Per-pixel appearance map in the SAME space the deform-attn samples.
+# class ReIDHead(nn.Module):
+#     """Appearance ReID head for a query-based (DETR / D-FINE) JDE tracker.
 
-        Applies the head's `value_proj` densely so that a track template
-        (bilinearly sampled from this map) and the dense map live in one metric
-        space — the prerequisite for the cross-frame correlation in
-        `appearance_motion.predict_centers`.
+#     Pipeline
+#     --------
+#     Each object query is a *pointer* saying WHERE to look; the appearance
+#     *content* is read from the shared feature map by deformable attention:
 
-        Args:
-            feat : [B, C, H, W] shared appearance feature map (`reid_feat`).
-        Returns:
-            [B, C, H, W] value-projected dense appearance map.
-        """
-        B, C, H, W = feat.shape
-        v = feat.flatten(2).permute(0, 2, 1)          # [B, HW, C]
-        v = self.value_proj(v)                        # [B, HW, C]
-        return v.permute(0, 2, 1).reshape(B, C, H, W)
+#         query (detached) ─┐
+#                           ├─► deform-attn(sample feat at box) ─► appearance
+#         box   (detached) ─┘                                          │
+#         query (detached) ───────────────────────────────────────────┤
+#                                                                      ▼
+#                                             fuse([query, appearance]) → emb_raw
+#                                                                      │
+#                                               LayerNorm neck (LNNeck)│
+#                                                                      ▼
+#                                                                     emb
 
-    def forward(self, query: torch.Tensor, boxes: torch.Tensor,
-                feat: torch.Tensor) -> dict:
-        """
-        Args:
-            query : [B, N, C]    detached decoder hidden state (pointer)
-            boxes : [B, N, 4]    detached predicted boxes, cxcywh in [0, 1]
-            feat  : [B, C, H, W] shared feature map (kept connected)
-        Returns:
-            {'emb': post-neck embedding (CE + eval),
-             'emb_raw': pre-neck embedding (triplet)}
-        """
-        if feat is None:
-            raise ValueError("ReIDHead requires the shared feature map `feat`.")
+#     Gradient policy (set by the model, not here):
+#       • `query` and `box` arrive **detached** → pointers only, so the decoder's
+#         localisation / classification semantics are shielded from ReID gradient.
+#       • `feat` arrives **connected** → appearance gradient flows into the
+#         encoder / backbone, giving the shared trunk identity-aware features
+#         (the "joint" coupling of JDE). Detection vs ReID are balanced later by
+#         learnable uncertainty weights in the criterion.
 
-        value_list, spatial_shapes = self._build_value(feat)
-        q   = self.norm_q(query)
-        ref = boxes.unsqueeze(2)                       # [B, N, 1, 4]
+#     Dual output (BNNeck principle) keeps the two ReID objectives from fighting
+#     over one vector:
+#       • ``emb_raw`` (pre-neck)  → TripletLoss  (free Euclidean space)
+#       • ``emb``     (post-neck) → CE / ArcFace + inference (stable manifold)
 
-        appearance = self.deform_attn(q, ref, value_list, spatial_shapes)
-        appearance = self.norm_attn(appearance)
+#     A per-sample LayerNorm neck is used instead of BatchNorm because the number
+#     of matched objects per image varies a lot in DETR-style training, which
+#     makes batch statistics unreliable.
+#     """
 
-        emb_raw = self.fuse(torch.cat([q, appearance], dim=-1))
-        emb     = self.neck(emb_raw)
-        return {'emb': emb, 'emb_raw': emb_raw}
+#     def __init__(self, hidden_dim: int, reid_dim: int,
+#                  num_heads: int = 8, num_points: int = 8):
+#         super().__init__()
+#         if hidden_dim % num_heads != 0:
+#             num_heads = _largest_divisor(hidden_dim)
+#         self.hidden_dim = hidden_dim
+#         self.num_heads  = num_heads
+
+#         # --- appearance sampling (single-scale deformable attention) ---
+#         self.value_proj  = nn.Linear(hidden_dim, hidden_dim)
+#         self.deform_attn = MSDeformableAttention(
+#             embed_dim=hidden_dim, num_heads=num_heads,
+#             num_levels=1, num_points=num_points, method='default',
+#         )
+#         self.norm_q    = nn.LayerNorm(hidden_dim)
+#         self.norm_attn = nn.LayerNorm(hidden_dim)
+
+#         # --- fuse [query, appearance] -> reid embedding ---
+#         self.fuse = nn.Sequential(
+#             nn.Linear(hidden_dim * 2, hidden_dim),
+#             nn.SiLU(inplace=True),
+#             nn.Linear(hidden_dim, reid_dim),
+#         )
+
+#         # --- LNNeck: per-sample normalisation, batch-size independent ---
+#         # affine=False keeps the vector on a stable manifold for cosine / CE
+#         # and does not distort the sphere used by the angular objective.
+#         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
+
+#     def _build_value(self, feat: torch.Tensor):
+#         """feat [B,C,H,W] -> (value_list, spatial_shapes) for MSDeformableAttention.
+
+#         Produces value[0] of shape [B, n_head, head_dim, H*W], which is the
+#         layout expected by `deformable_attention_core_func_v2` (value_shape
+#         'default').
+#         """
+#         B, C, H, W = feat.shape
+#         v = feat.flatten(2).permute(0, 2, 1)          # [B, HW, C]
+#         v = self.value_proj(v)                        # [B, HW, C]
+#         head_dim = C // self.num_heads
+#         v = v.reshape(B, H * W, self.num_heads, head_dim)
+#         v = v.permute(0, 2, 3, 1).contiguous()        # [B, n_head, head_dim, HW]
+#         return [v], [[H, W]]
+
+#     @torch.no_grad()
+#     def dense_appearance(self, feat: torch.Tensor) -> torch.Tensor:
+#         """Per-pixel appearance map in the SAME space the deform-attn samples.
+
+#         Applies the head's `value_proj` densely so that a track template
+#         (bilinearly sampled from this map) and the dense map live in one metric
+#         space — the prerequisite for the cross-frame correlation in
+#         `appearance_motion.predict_centers`.
+
+#         Args:
+#             feat : [B, C, H, W] shared appearance feature map (`reid_feat`).
+#         Returns:
+#             [B, C, H, W] value-projected dense appearance map.
+#         """
+#         B, C, H, W = feat.shape
+#         v = feat.flatten(2).permute(0, 2, 1)          # [B, HW, C]
+#         v = self.value_proj(v)                        # [B, HW, C]
+#         return v.permute(0, 2, 1).reshape(B, C, H, W)
+
+#     def forward(self, query: torch.Tensor, boxes: torch.Tensor,
+#                 feat: torch.Tensor) -> dict:
+#         """
+#         Args:
+#             query : [B, N, C]    detached decoder hidden state (pointer)
+#             boxes : [B, N, 4]    detached predicted boxes, cxcywh in [0, 1]
+#             feat  : [B, C, H, W] shared feature map (kept connected)
+#         Returns:
+#             {'emb': post-neck embedding (CE + eval),
+#              'emb_raw': pre-neck embedding (triplet)}
+#         """
+#         if feat is None:
+#             raise ValueError("ReIDHead requires the shared feature map `feat`.")
+
+#         value_list, spatial_shapes = self._build_value(feat)
+#         q   = self.norm_q(query)
+#         ref = boxes.unsqueeze(2)                       # [B, N, 1, 4]
+
+#         appearance = self.deform_attn(q, ref, value_list, spatial_shapes)
+#         appearance = self.norm_attn(appearance)
+
+#         emb_raw = self.fuse(torch.cat([q, appearance], dim=-1))
+#         emb     = self.neck(emb_raw)
+#         return {'emb': emb, 'emb_raw': emb_raw}
 
 
 class S4AuxiliaryHead(nn.Module):
@@ -728,6 +801,8 @@ class FalconJDEModel(nn.Module):
         use_reid: bool = True,
         reid_num_points: int = 8,
         reid_grad_scale: float = 1.0,
+        reid_use_s4_dense=False,
+        reid_s4_in_ch=None
     ):
         super().__init__()
         self.backbone   = backbone
@@ -745,63 +820,112 @@ class FalconJDEModel(nn.Module):
         self.reid_grad_scale = reid_grad_scale
 
         if use_reid:
-            self.reid_head = ReIDHead(
-                decoder.hidden_dim, reid_dim,
-                num_heads=8, num_points=reid_num_points,
-            )
+            # self.reid_head = ReIDHead(
+            #     decoder.hidden_dim, reid_dim,
+            #     num_heads=8, num_points=reid_num_points,
+            # )
+            self.reid_head = DenseReIDHead(decoder.hidden_dim, reid_dim, num_heads=8, num_points=reid_num_points,
+              use_s4_dense=False, dense_width=96, n_dense_blocks=2, dense_expand=1.5)
 
         if use_s4:
             self.s4_branch   = FeatFusion(sta_dim, decoder.hidden_dim, n_blocks=2)
             self.s4_aux_head = S4AuxiliaryHeadV2(decoder.hidden_dim)
 
-    def forward(self, x: torch.Tensor, targets=None):
-        feats = self.backbone(x)            
-        feats = self.encoder(feats)         
+    # def forward(self, x: torch.Tensor, targets=None):
+    #     feats = self.backbone(x)            
+    #     feats = self.encoder(feats)         
 
+    #     if self.use_s4:
+    #         c1 = getattr(self.backbone, '_s4_feat', None)
+    #         p2 = self.s4_branch(c1, feats[0])
+    #         dec_feats = [p2, feats[0], feats[1]]
+    #         reid_feat = p2
+    #     else:
+    #         dec_feats = feats
+    #         reid_feat = feats[0]            
+
+    #     out = self.decoder(dec_feats, targets)
+
+    #     if self.use_s4 and self.use_s4_aux and self.training:
+    #         out['pred_s4_aux'] = self.s4_aux_head(p2)   
+
+    #     if 'eval_hs' in out and self.use_reid:
+    #         hs = out.pop('eval_hs')
+    #         pred_boxes = out['pred_boxes']
+
+    #         # Gradient policy — the heart of conflict-free JDE:
+    #         #   • query (hs) and boxes are DETACHED → pointers only, so the
+    #         #     decoder's localisation / classification semantics are shielded
+    #         #     from the ReID gradient.
+    #         #   • reid_feat stays CONNECTED (optionally gradient-scaled) → the
+    #         #     appearance gradient flows into the encoder / backbone so the
+    #         #     shared trunk learns identity features. Detection vs ReID are
+    #         #     balanced by uncertainty weights in the criterion, not here.
+    #         # hs_det    = hs.detach()
+    #         # boxes_det = pred_boxes.detach()
+    #         reid_feat = grad_scale(reid_feat, self.reid_grad_scale)
+
+    #         reid_out = self.reid_head(hs, pred_boxes, reid_feat)
+    #         out['pred_reid']     = reid_out['emb']      # post-neck → CE + eval
+    #         out['pred_reid_raw'] = reid_out['emb_raw']  # pre-neck  → triplet
+
+    #         # Dense appearance map for Query Appearance-Motion (tracking only).
+    #         # Cheap (one Linear over H*W); gated so training/eval-mAP are untouched.
+    #         if getattr(self, 'return_reid_dense', False) and not self.training:
+    #             out['reid_dense']        = self.reid_head.dense_appearance(reid_feat)
+    #             out['reid_dense_stride'] = 4 if self.use_s4 else 8
+    #     elif 'eval_hs' in out:
+    #         out.pop('eval_hs')
+
+    #     return out
+
+    def forward(self, x: torch.Tensor, targets=None):
+        feats = self.backbone(x)
+        feats = self.encoder(feats)
+        c1 = getattr(self.backbone, '_s4_feat', None)
+    
         if self.use_s4:
-            c1 = getattr(self.backbone, '_s4_feat', None)
             p2 = self.s4_branch(c1, feats[0])
             dec_feats = [p2, feats[0], feats[1]]
             reid_feat = p2
         else:
             dec_feats = feats
-            reid_feat = feats[0]            
-
+            reid_feat = feats[0]
+    
         out = self.decoder(dec_feats, targets)
-
+    
         if self.use_s4 and self.use_s4_aux and self.training:
-            out['pred_s4_aux'] = self.s4_aux_head(p2)   
-
+            out['pred_s4_aux'] = self.s4_aux_head(p2)
+    
         if 'eval_hs' in out and self.use_reid:
             hs = out.pop('eval_hs')
             pred_boxes = out['pred_boxes']
-
-            # Gradient policy — the heart of conflict-free JDE:
-            #   • query (hs) and boxes are DETACHED → pointers only, so the
-            #     decoder's localisation / classification semantics are shielded
-            #     from the ReID gradient.
-            #   • reid_feat stays CONNECTED (optionally gradient-scaled) → the
-            #     appearance gradient flows into the encoder / backbone so the
-            #     shared trunk learns identity features. Detection vs ReID are
-            #     balanced by uncertainty weights in the criterion, not here.
-            # hs_det    = hs.detach()
-            # boxes_det = pred_boxes.detach()
-            reid_feat = grad_scale(reid_feat, self.reid_grad_scale)
-
-            reid_out = self.reid_head(hs, pred_boxes, reid_feat)
-            out['pred_reid']     = reid_out['emb']      # post-neck → CE + eval
-            out['pred_reid_raw'] = reid_out['emb_raw']  # pre-neck  → triplet
-
-            # Dense appearance map for Query Appearance-Motion (tracking only).
-            # Cheap (one Linear over H*W); gated so training/eval-mAP are untouched.
-            if getattr(self, 'return_reid_dense', False) and not self.training:
-                out['reid_dense']        = self.reid_head.dense_appearance(reid_feat)
-                out['reid_dense_stride'] = 4 if self.use_s4 else 8
+    
+            # GRADIENT POLICY (đã sửa đúng theo docstring):
+            #   • hs, pred_boxes -> DETACH: chỉ là pointer, KHÔNG để gradient ReID
+            #     chạm vào localization/classification của decoder.
+            #   • reid_feat      -> CÒN nối (qua grad_scale): coupling JDE có kiểm soát.
+            reid_feat_c = grad_scale(reid_feat, self.reid_grad_scale)
+    
+            # train: cần emb_map cho dense loss; infer: chỉ cần khi bật dense-tracking
+            want_dense = self.training or getattr(self, 'return_reid_dense', False)
+            reid_out = self.reid_head(
+                hs.detach(), pred_boxes.detach(), reid_feat_c,
+                c1=c1, return_dense=want_dense,
+            )
+            out['pred_reid']     = reid_out['emb']      # post-neck -> CE + eval
+            out['pred_reid_raw'] = reid_out['emb_raw']  # pre-neck  -> triplet
+    
+            if 'emb_map' in reid_out:
+                if self.training:
+                    out['pred_reid_map'] = reid_out['emb_map']        # [B,D,H,W] cho dense loss
+                if getattr(self, 'return_reid_dense', False) and not self.training:
+                    out['reid_dense']        = reid_out['emb_map'][0]  # [D,H,W] (batch=1 khi track)
+                    out['reid_dense_stride'] = 4 if (self.reid_head.use_s4_dense or self.use_s4) else 8
         elif 'eval_hs' in out:
             out.pop('eval_hs')
-
+    
         return out
-
     def deploy(self):
         self.eval()
         for m in self.modules():
@@ -984,6 +1108,8 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         sta_dim=sta_dim,
         reid_num_points=getattr(opt, 'reid_num_points', 8),
         reid_grad_scale=getattr(opt, 'reid_grad_scale', 1.0),
+        reid_use_s4_dense=getattr(opt, 'reid_use_s4_dense', False),
+        reid_s4_in_ch=getattr(opt, 'conv_inplane', 32)
     )
 
     ckpt_path = getattr(opt, 'deim_pretrained', '')

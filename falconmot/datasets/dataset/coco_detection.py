@@ -790,7 +790,7 @@ from collections import defaultdict
 
 from falconmot.datasets.augment import (
     augment_hsv, random_affine, random_homography_warp, 
-    random_zoom_out, random_crop
+    random_zoom_out, random_crop, object_aware_occlusion, random_erasing
 )
 
 # ---------------------------------------------------------------------------
@@ -898,6 +898,12 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         self.homography_strength   = getattr(opt, 'homography_strength',  0.12)
         self.use_gridmask          = getattr(opt, 'gridmask',             False)
         self.gridmask_prob         = getattr(opt, 'gridmask_prob',        0.3)
+        self.use_obj_occlusion = getattr(opt, 'obj_occlusion',      True)
+        self.obj_occ_prob      = getattr(opt, 'obj_occ_prob',       0.5)
+        self.obj_occ_frac      = getattr(opt, 'obj_occ_frac',       0.3)
+        self.obj_occ_mode      = getattr(opt, 'obj_occ_mode',       'patch')
+        self.use_random_erasing= getattr(opt, 'random_erasing',     False)
+        self.re_prob           = getattr(opt, 're_prob',            0.25)
 
         self._build_seq_index()
 
@@ -1181,7 +1187,13 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         # ── Các Augment cuối (GridMask & Flip) ───────────────────────────
         if do_aug and self.use_gridmask:
             img = self._gridmask(img, p=self.gridmask_prob)
-
+        # ── Occlusion cho ReID/MOT (CHÈN ĐOẠN NÀY) ───────────────────────
+        if do_aug and self.use_obj_occlusion:
+            img, labels = object_aware_occlusion(
+                img, labels, p=self.obj_occ_prob,
+                occ_obj_frac=self.obj_occ_frac, mode=self.obj_occ_mode)
+        if do_aug and self.use_random_erasing:
+            img, labels = random_erasing(img, labels, p=self.re_prob)
         if do_aug and random.random() > 0.5:
             img = np.fliplr(img)
             if len(labels) > 0:
