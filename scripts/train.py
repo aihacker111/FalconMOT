@@ -44,28 +44,94 @@ def _with_lr(opt, lr):
     return o
 
 
+# def build_optimizer(model, opt):
+#     """
+#     AdamW with up to 6 param groups:
+#       - backbone non-norm : lr * backbone_lr_factor, weight_decay = default
+#       - backbone norm/bias: lr * backbone_lr_factor, weight_decay = 0
+#       - reid_head non-norm: lr * reid_lr_factor,      weight_decay = default
+#       - reid_head norm/bias: lr * reid_lr_factor,     weight_decay = 0
+#       - other   norm/bias : lr,                       weight_decay = 0
+#       - everything else   : lr,                       weight_decay = default
+
+#     reid_head is trained from scratch while backbone/encoder/decoder are
+#     pretrained, so it gets its own LR (reid_lr_factor, default 1.0 = no change).
+#     The ReID ID classifiers live in the criterion and are given the same reid LR
+#     inside base_trainer; s_det/s_id stay at base LR.
+
+#     Norm layers are detected by module type (not just param name) so that
+#     BN gamma params inside anonymous nn.Sequential blocks (e.g.
+#     backbone.sta.stem.1.weight) are correctly assigned weight_decay=0.
+#     """
+#     base_lr      = opt.lr
+#     backbone_lr  = base_lr * getattr(opt, 'backbone_lr_factor', 0.05)
+#     reid_lr      = base_lr * getattr(opt, 'reid_lr_factor', 1.0)
+#     weight_decay = opt.weight_decay
+
+#     # Collect FQNs of all params that belong to a normalization module.
+#     norm_param_names: set = set()
+#     for mod_name, module in model.named_modules():
+#         if isinstance(module, _NORM_TYPES):
+#             for p_name, _ in module.named_parameters(recurse=False):
+#                 norm_param_names.add(f'{mod_name}.{p_name}')
+
+#     backbone_wd, backbone_no_wd = [], []
+#     reid_wd, reid_no_wd         = [], []
+#     other_no_wd, default        = [], []
+#     for name, param in model.named_parameters():
+#         if not param.requires_grad:
+#             continue
+#         is_backbone = 'backbone' in name
+#         is_reid     = 'reid_head' in name
+#         is_no_wd    = name in norm_param_names or name.endswith('.bias')
+#         if is_backbone and is_no_wd:
+#             backbone_no_wd.append(param)
+#         elif is_backbone:
+#             backbone_wd.append(param)
+#         elif is_reid and is_no_wd:
+#             reid_no_wd.append(param)
+#         elif is_reid:
+#             reid_wd.append(param)
+#         elif is_no_wd:
+#             other_no_wd.append(param)
+#         else:
+#             default.append(param)
+
+#     param_groups = [
+#         pg for pg in [
+#             {'params': backbone_wd,    'lr': backbone_lr},
+#             {'params': backbone_no_wd, 'lr': backbone_lr, 'weight_decay': 0.},
+#             {'params': reid_wd,        'lr': reid_lr},
+#             {'params': reid_no_wd,     'lr': reid_lr,     'weight_decay': 0.},
+#             {'params': other_no_wd,                       'weight_decay': 0.},
+#             {'params': default},
+#         ]
+#         if pg['params']
+#     ]
+
+#     optimizer = torch.optim.AdamW(
+#         param_groups,
+#         lr=base_lr,
+#         betas=(0.9, 0.999),
+#         weight_decay=weight_decay,
+#     )
+#     return optimizer
+
 def build_optimizer(model, opt):
     """
-    AdamW with up to 6 param groups:
-      - backbone non-norm : lr * backbone_lr_factor, weight_decay = default
-      - backbone norm/bias: lr * backbone_lr_factor, weight_decay = 0
-      - reid_head non-norm: lr * reid_lr_factor,      weight_decay = default
-      - reid_head norm/bias: lr * reid_lr_factor,     weight_decay = 0
-      - other   norm/bias : lr,                       weight_decay = 0
-      - everything else   : lr,                       weight_decay = default
-
-    reid_head is trained from scratch while backbone/encoder/decoder are
-    pretrained, so it gets its own LR (reid_lr_factor, default 1.0 = no change).
-    The ReID ID classifiers live in the criterion and are given the same reid LR
-    inside base_trainer; s_det/s_id stay at base LR.
-
-    Norm layers are detected by module type (not just param name) so that
-    BN gamma params inside anonymous nn.Sequential blocks (e.g.
-    backbone.sta.stem.1.weight) are correctly assigned weight_decay=0.
+    AdamW với các param groups được tinh chỉnh LR:
+      - backbone (pretrained) : lr * 0.05 (mặc định)
+      - decoder (pretrained)  : lr * 0.1  (fine-tune nhẹ nhàng phần Head)
+      - reid_head (scratch)   : lr * 1.0  (học từ đầu)
+      - encoder/S4            : lr * 1.0  (base_lr)
     """
     base_lr      = opt.lr
     backbone_lr  = base_lr * getattr(opt, 'backbone_lr_factor', 0.05)
     reid_lr      = base_lr * getattr(opt, 'reid_lr_factor', 1.0)
+    
+    # THÊM LR CHO DECODER (Rất nhỏ để fine-tune an toàn các Head vừa được unfreeze)
+    decoder_lr   = base_lr * getattr(opt, 'decoder_lr_factor', 0.1) 
+    
     weight_decay = opt.weight_decay
 
     # Collect FQNs of all params that belong to a normalization module.
@@ -76,18 +142,27 @@ def build_optimizer(model, opt):
                 norm_param_names.add(f'{mod_name}.{p_name}')
 
     backbone_wd, backbone_no_wd = [], []
+    decoder_wd, decoder_no_wd   = [], []   # Thêm list chứa tham số Decoder
     reid_wd, reid_no_wd         = [], []
     other_no_wd, default        = [], []
+    
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
+            
         is_backbone = 'backbone' in name
+        is_decoder  = 'decoder' in name    # Phân loại tham số của Decoder
         is_reid     = 'reid_head' in name
         is_no_wd    = name in norm_param_names or name.endswith('.bias')
+        
         if is_backbone and is_no_wd:
             backbone_no_wd.append(param)
         elif is_backbone:
             backbone_wd.append(param)
+        elif is_decoder and is_no_wd:      # Đẩy vào nhóm Decoder (Không weight decay)
+            decoder_no_wd.append(param)
+        elif is_decoder:                   # Đẩy vào nhóm Decoder (Có weight decay)
+            decoder_wd.append(param)
         elif is_reid and is_no_wd:
             reid_no_wd.append(param)
         elif is_reid:
@@ -97,10 +172,13 @@ def build_optimizer(model, opt):
         else:
             default.append(param)
 
+    # Đưa các nhóm vào Optimizer với LR tương ứng
     param_groups = [
         pg for pg in [
             {'params': backbone_wd,    'lr': backbone_lr},
             {'params': backbone_no_wd, 'lr': backbone_lr, 'weight_decay': 0.},
+            {'params': decoder_wd,     'lr': decoder_lr},                     # Nhóm Decoder mới
+            {'params': decoder_no_wd,  'lr': decoder_lr, 'weight_decay': 0.}, # Nhóm Decoder mới
             {'params': reid_wd,        'lr': reid_lr},
             {'params': reid_no_wd,     'lr': reid_lr,     'weight_decay': 0.},
             {'params': other_no_wd,                       'weight_decay': 0.},
