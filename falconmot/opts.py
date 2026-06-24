@@ -74,7 +74,7 @@ class opts(object):
         self.parser.add_argument('--num_queries',   type=int, default=300)
         self.parser.add_argument('--num_dec_layers', type=int, default=4)
         self.parser.add_argument('--dec_dim_ff',    type=int, default=512)
-        self.parser.add_argument('--num_denoising', type=int, default=200,
+        self.parser.add_argument('--num_denoising', type=int, default=100,
                                  help='CDN denoising queries (200: hội tụ nhanh hơn ở cảnh dày VisDrone)')
         self.parser.add_argument('--reg_max',       type=int, default=32)
         self.parser.add_argument('--mal_alpha',     type=float, default=None,

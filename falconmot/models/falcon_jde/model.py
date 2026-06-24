@@ -1550,7 +1550,7 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         dim_feedforward   = getattr(opt, 'dec_dim_ff',    512),
         activation        = 'silu',
         mlp_act           = 'silu',
-        num_denoising     = getattr(opt, 'num_denoising', 200),
+        num_denoising     = getattr(opt, 'num_denoising', 100),
         label_noise_ratio = 0.5,
         box_noise_scale   = 1.0,
         eval_spatial_size = tuple(eval_size) if eval_size else None,
