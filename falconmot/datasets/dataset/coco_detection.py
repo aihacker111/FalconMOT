@@ -1230,8 +1230,8 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
 # ---------------------------------------------------------------------------
 
 def preprocess_for_tracking(img0, width: int, height: int):
-    mean = np.array(getattr(opt, 'mean', [0.485, 0.456, 0.406]), dtype=np.float32)
-    std  = np.array(getattr(opt, 'std', [0.229, 0.224, 0.225]), dtype=np.float32)
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
     img = cv2.resize(img0, (width, height), interpolation=cv2.INTER_AREA)
     img = img[:, :, ::-1].astype(np.float32) / 255.0
     img = (img - mean) / std
