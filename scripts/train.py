@@ -21,7 +21,7 @@ from falconmot.logger import Logger
 from falconmot.datasets.dataset_factory import get_dataset
 from falconmot.engine.train_factory import train_factory
 from falconmot.engine import stage as stage_mgr
-from falconmot.utils.jde_eval import CocoJsonEvaluator, JDECocoEvaluator
+from falconmot.utils.jde_eval import CocoJsonEvaluator
 from falconmot.models.falcon_jde.postprocessor import FalconJDEPostProcessor
 # ── Tracking-metric validation (motmetrics IDF1/MOTA) ──────────────────────
 from collections import defaultdict as _defaultdict
