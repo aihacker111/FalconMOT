@@ -1365,8 +1365,12 @@ class FalconJDEModel(nn.Module):
     
             # train: cần emb_map cho dense loss; infer: chỉ cần khi bật dense-tracking
             want_dense = self.training or getattr(self, 'return_reid_dense', False)
+            # reid_out = self.reid_head(
+            #     hs.detach(), pred_boxes.detach(), reid_feat_c,
+            #     c1=c1, return_dense=want_dense,
+            # )
             reid_out = self.reid_head(
-                hs.detach(), pred_boxes.detach(), reid_feat_c,
+                hs, pred_boxes, reid_feat_c,
                 c1=c1, return_dense=want_dense,
             )
             out['pred_reid']     = reid_out['emb']      # post-neck -> CE + eval
