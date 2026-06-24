@@ -17,7 +17,7 @@ class opts(object):
                                       'no ReID loss, no temporal mosaic. Save checkpoint, then run '
                                       'stage-2 tracking fine-tune with --load_model (no flag).')
         self.parser.add_argument('--dataset',  default='coco',
-                                 help='coco (COCO JSON format) | jde (legacy JDE index files)')
+                                 help='coco (COCO JSON format) — only supported format')
         self.parser.add_argument('--exp_id',   default='default')
         self.parser.add_argument('--test',     action='store_true')
         self.parser.add_argument('--load_model', default='',
@@ -201,9 +201,6 @@ class opts(object):
                                  help='ReID loss weight (0 = detection only)')
         self.parser.add_argument('--tri', action='store_true',
                                  help='add triplet loss to ReID')
-        self.parser.add_argument('--rep', action='store_true', default=False,
-                                 help='enable RepulsionLoss')
-        self.parser.add_argument('--rep_weight', type=float, default=0.5)
         self.parser.add_argument('--use_arcface', action='store_true', default=False,
                                  help='use ArcFace for ReID classification. Default OFF = plain '
                                       'CE + emb_scale (the stable FairMOT/AMOT recipe).')
