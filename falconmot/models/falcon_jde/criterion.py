@@ -589,4 +589,15 @@ class FalconJDECriterion(nn.Module):
         losses['s_det'] = self.s_det.detach()
         losses['s_id'] = self.s_id.detach()
         losses['loss'] = total
+        log_keys = ['loss_mal', 'loss_bbox', 'loss_giou', 'loss_fgl', 'loss_ddf']
+        for key in log_keys:
+            # Tìm tất cả các value mà tên có chứa tiền tố key (vd: loss_ddf_aux_0)
+            matched_vals = [v for k, v in losses.items() if k.startswith(key) and isinstance(v, torch.Tensor)]
+            
+            if matched_vals:
+                # Tính tổng và gán đè lại vào key chuẩn mà Trainer đang tìm.
+                # Dùng .detach() để đảm bảo bước hiển thị không phá vỡ đồ thị đạo hàm.
+                losses[key] = sum(matched_vals).detach()
+            else:
+                losses[key] = torch.tensor(0.0, device=total.device)
         return losses
