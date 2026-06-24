@@ -137,36 +137,56 @@ def apply_phase0(model):
 #     _report(model)
 
 
-def apply_phase1(model, keep_backbone_frozen: bool = True, freeze_norm: bool = True, freeze_decoder: bool = True):
+def apply_phase1(model, keep_backbone_frozen: bool = True, freeze_norm: bool = True):
     """
-    Unfreeze encoder + S4. 
-    Tuỳ chọn Freeze backbone và Freeze decoder (rất quan trọng khi train trên video).
+    Stage 2 - Phase 1 (Joint fine-tune):
+    - Đóng băng Backbone (Tùy chọn, mặc định True).
+    - Mở khóa Encoder & S4 Branch để học ReID.
+    - DECODER: Partial Unfreeze (Khóa Transformer, Mở khóa Prediction Heads).
+    - Mở khóa ReID Head.
     """
-    print(f'[stage] === Phase 1: joint fine-tune (freeze_decoder={freeze_decoder}) ===')
+    print('[stage] === Phase 1: joint fine-tune (PARTIAL UNFREEZE DECODER) ===')
     m = _core(model)
     
-    # 1. Backbone: Thường nên freeze khi train trên video
+    # 1. Backbone
     _set_module_trainable(m.backbone, not keep_backbone_frozen, 'backbone')
     
-    # 2. Encoder & S4 Branch: Luôn UNFREEZE để học đặc trưng ReID
+    # 2. Encoder & S4 Branch
     _set_module_trainable(m.encoder, True, 'encoder')
     if getattr(m, 'use_s4', False):
         _set_module_trainable(m.s4_branch, True, 's4_branch')
         _set_module_trainable(m.s4_aux_head, True, 's4_aux_head')
-        
-    # 3. Decoder: FREEZE nếu muốn giữ nguyên khả năng detect của Stage 1
-    _set_module_trainable(m.decoder, not freeze_decoder, 'decoder')
+
+    # -------------------------------------------------------------------
+    # 3. DECODER: PARTIAL UNFREEZE (Mở khóa có chọn lọc)
+    # -------------------------------------------------------------------
+    # a. Khóa chặt khối Transformer Attention (Não bộ) để không quên kiến thức Stage 1
+    _set_module_trainable(m.decoder.decoder, False, 'dec_transformer')
     
-    # 4. ReID Head: Luôn UNFREEZE
+    # b. Mở khóa các Head dự đoán cuối cùng (Tay chân) để nắn chỉnh lại Bbox/Score cho Video
+    _set_module_trainable(m.decoder.dec_score_head, True, 'dec_score_head')
+    _set_module_trainable(m.decoder.dec_bbox_head, True, 'dec_bbox_head')
+    
+    # Mở khóa thêm các Head phụ trợ của Encoder/Pre-decoder (nếu có)
+    if hasattr(m.decoder, 'pre_bbox_head'):
+        _set_module_trainable(m.decoder.pre_bbox_head, True, 'pre_bbox_head')
+    if hasattr(m.decoder, 'enc_score_head'):
+        _set_module_trainable(m.decoder.enc_score_head, True, 'enc_score_head')
+    if hasattr(m.decoder, 'enc_bbox_head'):
+        _set_module_trainable(m.decoder.enc_bbox_head, True, 'enc_bbox_head')
+    # -------------------------------------------------------------------
+
+    # 4. ReID Head
     if _has_reid_head(model):
         _set_module_trainable(m.reid_head, True, 'reid_head')
 
+    # 5. Khóa BatchNorm Statistics (Tránh Domain Drift trên Video)
     if freeze_norm:
-        # Giữ nguyên running-stats của BatchNorm để tránh bị trôi (drift)
         freeze_bn_stats(m.encoder, 'encoder')
         if getattr(m, 'use_s4', False):
             freeze_bn_stats(m.s4_branch, 's4_branch')
             freeze_bn_stats(m.s4_aux_head, 's4_aux_head')
+            
     _report(model)
 
 
