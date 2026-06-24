@@ -378,8 +378,6 @@ class ECDetSequenceRunner5cls:
             conf_thres=opt.conf_thres,
             use_focal_loss=True,
         )
-        self.postprocessor.set_net_hw(net_h, net_w)
-
         # Tracker chạy trên 5cls space (sau remap); num_classes=5 đảm bảo
         # track_id offset = cls_5idx * 1_000_000, khớp với GT side.
         opt_tracker        = type('Opt', (), dict(vars(opt)))()   # shallow copy
