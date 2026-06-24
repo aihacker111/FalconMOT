@@ -812,7 +812,7 @@ def run(opt):
             stage_mgr.apply_phase1(
                 model,
                 keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', True),
-                freeze_norm=getattr(opt, 'freeze_norm_stats', True),
+                freeze_norm=getattr(opt, 'freeze_norm_stats', False),
                 freeze_decoder=True  # GIỮ CHẶT DECODER CHO BÀI TOÁN VIDEO
             )
             # set of trainable params changed -> rebuild optimizer (+criterion params)
