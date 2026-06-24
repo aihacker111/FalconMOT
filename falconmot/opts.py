@@ -105,7 +105,7 @@ class opts(object):
                                  help='DEPRECATED / ignored — a single ReID head is always used.')
         self.parser.add_argument('--reid_num_points', type=int, default=8,
                                  help='số điểm deformable-sample/box cho ReID head')
-        self.parser.add_argument('--reid_grad_scale', type=float, default=1.0,
+        self.parser.add_argument('--reid_grad_scale', type=float, default=0.1,
                                  help='độ mạnh gradient ReID chảy vào trunk qua feature map '
                                       '(1.0 = full JDE coupling; hạ về ~0.1 nếu detection bị nhiễu).')
 

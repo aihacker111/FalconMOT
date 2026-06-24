@@ -52,7 +52,10 @@ def to_tensor(img_bgr):
 
   KHÔNG áp dụng Mean/Std normalization theo cấu hình mô hình hiện tại.
   """
+  mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+  std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
   rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+  rgb = (rgb - mean) / std
   # Đổi trục từ (H, W, C) sang (C, H, W) và thêm batch dimension (1, C, H, W)
   return torch.from_numpy(rgb.transpose(2, 0, 1)).unsqueeze(0)
 

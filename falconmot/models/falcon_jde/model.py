@@ -1370,7 +1370,7 @@ class FalconJDEModel(nn.Module):
             #     c1=c1, return_dense=want_dense,
             # )
             reid_out = self.reid_head(
-                hs, pred_boxes, reid_feat_c,
+                hs.detach(), pred_boxes.detach(), reid_feat_c,
                 c1=c1, return_dense=want_dense,
             )
             out['pred_reid']     = reid_out['emb']      # post-neck -> CE + eval

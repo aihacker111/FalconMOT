@@ -729,9 +729,14 @@ def run(opt):
         # ── Phase 0 -> Phase 1 transition (stage-2 only) ─────────────────────
         if (not det_only) and (not in_phase1) and epoch > warmup_ep:
             in_phase1 = True
-            stage_mgr.apply_phase1(model,
-                                   keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', True),
-                                   freeze_norm=getattr(opt, 'freeze_norm_stats', True))
+            
+            # ---> THÊM THAM SỐ freeze_decoder=True VÀO ĐÂY <---
+            stage_mgr.apply_phase1(
+                model,
+                keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', True),
+                freeze_norm=getattr(opt, 'freeze_norm_stats', True),
+                freeze_decoder=True  # GIỮ CHẶT DECODER CHO BÀI TOÁN VIDEO
+            )
             # set of trainable params changed -> rebuild optimizer (+criterion params)
             optimizer = stage_mgr.build_phase_optimizer(
                 model, trainer.loss, opt, build_optimizer, lr=opt.lr)
