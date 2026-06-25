@@ -928,7 +928,9 @@ class FalconJDECriterion(nn.Module):
         cls_emb       = {c: [] for c in self.nid_dict}
         cls_emb_raw   = {c: [] for c in self.nid_dict}
         cls_emb_dense = {c: [] for c in self.nid_dict}
+        cls_emb_app   = {c: [] for c in self.nid_dict}          # MỚI
         cls_ids       = {c: [] for c in self.nid_dict}
+        pred_reid_app = outputs.get('pred_reid_app', None)
 
         for b_idx, (src_idx, tgt_idx) in enumerate(indices):
             if len(src_idx) == 0:
@@ -944,6 +946,7 @@ class FalconJDECriterion(nn.Module):
             src_v = src_idx[valid]
             emb_b = pred_reid[b_idx][src_v]
             emb_b_r = pred_reid_raw[b_idx][src_v]
+            app_b = pred_reid_app[b_idx][src_v] if pred_reid_app is not None else None
             lbl_b = labels[valid]
             ids_b = tids[valid]
 
@@ -958,6 +961,8 @@ class FalconJDECriterion(nn.Module):
                     continue
                 cls_emb[cls_id].append(emb_b[mask])
                 cls_emb_raw[cls_id].append(emb_b_r[mask])
+                if app_b is not None:                                  # MỚI
+                    cls_emb_app[cls_id].append(app_b[mask])
                 cls_ids[cls_id].append(ids_b[mask])
                 if dense_b is not None:
                     cls_emb_dense[cls_id].append(dense_b[mask])
@@ -992,9 +997,11 @@ class FalconJDECriterion(nn.Module):
                     logits_d = self.linear_classifiers[str(cls_id)](emb_id_d)
                 reid_loss = reid_loss + self.w_dense_ce * self.ce_loss(logits_d, ids)
 
-                cons = 1.0 - (F.normalize(dense, dim=1)
-                              * F.normalize(emb.detach(), dim=1)).sum(dim=1)
-                reid_loss = reid_loss + self.w_cons * cons.mean()
+                if cls_emb_app[cls_id]:
+                    app_t = torch.cat(cls_emb_app[cls_id], dim=0)
+                    cons = 1.0 - (F.normalize(dense, dim=1)
+                                  * F.normalize(app_t.detach(), dim=1)).sum(dim=1)
+                    reid_loss = reid_loss + self.w_cons * cons.mean()
 
             n_active += 1
 

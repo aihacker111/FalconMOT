@@ -1260,67 +1260,62 @@ def _largest_divisor(dim, candidates=(8, 6, 4, 3, 2, 1)):
 
 
 # ===========================================================================
-#  DenseReIDHead — DECOUPLED BRANCH, QAM-COMPATIBLE
+#  DenseReIDHead — DECOUPLED BRANCH, QAM-COMPATIBLE, CONS-COHERENT
 #  (drop-in thay cho class cũ ở model.py ~dòng 1183–1259)
 #
 #  Giữ NGUYÊN chữ ký & format:
 #     __init__(hidden_dim, reid_dim, num_heads, num_points,
-#              use_s4_dense, s4_in_ch, **kwargs)              -> build không đổi
+#              use_s4_dense, s4_in_ch, **kwargs)
 #     forward(query, boxes, reid_feat, c1=None, return_dense=False)
-#     output keys: 'emb' (post-neck, CE+eval+cosine BYTE),
-#                  'emb_raw' (pre-neck, triplet),
-#                  'emb_map' ([B,reid_dim,H,W], xuất ra làm reid_dense cho QAM).
+#     output keys: 'emb'      (post-neck: CE+eval+cosine BYTE),
+#                  'emb_raw'  (pre-neck:  triplet),
+#                  'emb_app'  (MỚI: mẫu THUẦN của emb_map tại box -> đích cho
+#                              dense `cons`, cùng không gian với `dense`),
+#                  'emb_map'  ([B,reid_dim,H,W]: reid_dense cho QAM + dense CE).
 #
-#  Phụ thuộc đã có sẵn trong scope model.py: nn, F, torch, LayerNorm2d,
+#  Phụ thuộc đã có trong scope model.py: nn, F, torch, LayerNorm2d,
 #  FeatFusion, MSDeformableAttention, _largest_divisor.
 #
-#  ───────────────────── BẤT BIẾN ĐỒNG NHẤT (cho QAM) ─────────────────────
-#  QAM (appearance_motion.py) lấy template = sample_dense(reid_dense) tại tâm
-#  box, rồi correlate template ĐÓ với chính reid_dense (predict_centers:
-#  sim = templates @ R). Nên template & search-field LUÔN cùng không gian
-#  *theo kiến trúc*. Điều kiện duy nhất để mạch lạc: emb thưa và reid_dense
-#  phải sample từ CÙNG một field. => KHÔNG dùng value_proj. Value của
-#  deform-attn = chính emb_map; reid_dense xuất ra cũng = emb_map. Một field
-#  duy nhất cho: emb thưa, dense map, template QAM.
+#  ─────────────── BẤT BIẾN ĐỒNG NHẤT (một field duy nhất) ────────────────
+#  emb_map đóng mọi vai appearance: Value của deform-attn, reid_dense cho QAM,
+#  nguồn template QAM (sample_dense), VÀ nguồn cho dense-CE/cons trong loss.
+#  => KHÔNG value_proj. Mọi nhánh appearance cùng sample một tensor.
+#
+#  ─────────── FIX CONFLICT dense_ce ↔ cons (lý do có 'emb_app') ───────────
+#  `cons` cũ kéo `dense`(mẫu tâm emb_map) về `emb` — nhưng emb đã qua neck +
+#  cộng query nên LỆCH khỏi không gian emb_map -> đối kháng với dense_ce
+#  (vốn nặn emb_map theo hướng tách-ID). Sửa: cho `cons` ngắm `emb_app` =
+#  mẫu THUẦN của emb_map tại box (raw deform output, trước norm/ffn/query).
+#  Khi đó dense(mẫu tâm) và emb_app(mẫu box) cùng là mẫu của emb_map ->
+#  `cons` chỉ còn là "nhất quán cục bộ trên map", BỔ TRỢ dense_ce, hết giằng co.
 #
 #  4 thay đổi so với bản gốc của bạn
 #  ---------------------------------
-#  (1) DECOUPLED: detach reid_feat & c1 trong forward (detach_input=True) ->
-#      reid_loss không chạm backbone/encoder/decoder. (QAM chạy ở inference,
-#      không backward, nên detach vô hại với QAM.)
-#  (2) HIGH-RES stride-4: fuse c1+reid_feat -> dense map ở stride-4. Đỉnh
-#      correlation QAM SẮC hơn cho vật nhỏ -> soft-argmax đo tâm chính xác hơn.
-#  (3) OWN-TOWER SÂU HƠN, KERNEL NHỎ (3x3 DW): thêm capacity mà GIỮ đỉnh sắc
-#      (không dùng 7x7 ở tower -> tránh nhòe peak, hại QAM). KHÔNG value_proj.
-#  (4) GIẢM NHIỄM QUERY trên nhánh emb (cosine BYTE): query chỉ định vị điểm
-#      sample; nội dung emb chủ yếu là appearance. KHÔNG ảnh hưởng QAM (QAM
-#      không dùng emb), chỉ giúp nhánh cosine phân biệt instance tốt hơn.
+#  (1) DECOUPLED: detach reid_feat & c1 (detach_input=True).
+#  (2) HIGH-RES stride-4: dense map sắc hơn -> đỉnh correlation QAM rõ hơn.
+#  (3) OWN-TOWER sâu hơn, kernel NHỎ 3x3 (giữ đỉnh sắc), KHÔNG value_proj.
+#  (4) Query CHỈ định vị; nội dung emb = appearance + residual có cổng (chỉ
+#      ảnh hưởng cosine BYTE, không đụng QAM/dense).
 # ===========================================================================
- 
- 
+
+
 class _ReIDResBlock(nn.Module):
     """Residual nhẹ, kernel NHỎ (3x3 DW) -> thêm chiều sâu nhưng giữ đỉnh
-    correlation sắc nét cho QAM và chống identity-bleeding ở vật nhỏ."""
+    correlation sắc cho QAM, chống identity-bleeding ở vật nhỏ."""
     def __init__(self, dim: int):
         super().__init__()
         self.dw   = nn.Conv2d(dim, dim, 3, padding=1, groups=dim, bias=False)
         self.norm = LayerNorm2d(dim)
         self.pw   = nn.Conv2d(dim, dim, 1, bias=False)
         self.act  = nn.GELU()
- 
+
     def forward(self, x):
         return x + self.pw(self.act(self.norm(self.dw(x))))
- 
- 
+
+
 class DenseReIDHead(nn.Module):
-    """ReID head tách rời (decoupled) + đồng nhất field cho QAM.
- 
-    Một dense map duy nhất (emb_map) đóng ba vai:
-      • Value cho deform-attn  -> sinh emb thưa per-query.
-      • reid_dense xuất ra      -> search-field cho QAM.
-      • nguồn để QAM sample template (sample_dense tại tâm box).
-    Nhờ một-field-duy-nhất, correlation template·dense của QAM luôn hợp lệ.
-    """
+    """ReID head tách rời (decoupled), một-field-duy-nhất cho QAM, và lộ
+    'emb_app' để dense `cons` không còn xung đột với dense_ce."""
     def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
                  use_s4_dense=False, s4_in_ch=None,
                  tower_depth=2, query_gate_init=0.1, detach_input=True,
@@ -1332,13 +1327,13 @@ class DenseReIDHead(nn.Module):
         self.num_heads     = nh
         self.use_s4_dense  = bool(use_s4_dense and s4_in_ch is not None)
         self.detach_input  = bool(detach_input)
- 
+
         # (2) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
         if self.use_s4_dense:
             self.s4_fuse = FeatFusion(s4_in_ch, hidden_dim, n_blocks=1)
- 
+
         # (3) OWN-TOWER: vào reid_dim rồi tower_depth block residual DW3x3.
-        #     Đầu ra emb_map = field DUY NHẤT (Value + reid_dense + template QAM).
+        #     Output emb_map = field DUY NHẤT (Value + reid_dense + dense-CE/cons).
         self.in_proj = nn.Sequential(
             nn.Conv2d(hidden_dim, reid_dim, kernel_size=1, bias=False),
             LayerNorm2d(reid_dim),
@@ -1347,10 +1342,10 @@ class DenseReIDHead(nn.Module):
             *[_ReIDResBlock(reid_dim) for _ in range(max(1, tower_depth))],
             LayerNorm2d(reid_dim),
         )
- 
-        # KHÔNG value_proj: Value = emb_map trực tiếp -> đồng nhất với QAM.
- 
-        # SPARSE PATH — query CHỈ để định vị điểm sample (where-to-look).
+
+        # KHÔNG value_proj: Value = emb_map trực tiếp -> đồng nhất với QAM/loss.
+
+        # SPARSE PATH — query CHỈ để định vị điểm sample.
         self.q_proj      = nn.Linear(hidden_dim, reid_dim)
         self.norm_q      = nn.LayerNorm(reid_dim)
         self.deform_attn = MSDeformableAttention(
@@ -1358,7 +1353,7 @@ class DenseReIDHead(nn.Module):
             num_levels=1, num_points=num_points, method='default',
         )
         self.norm_attn   = nn.LayerNorm(reid_dim)
- 
+
         # (4) Nội dung emb = appearance (chủ đạo) + residual có cổng từ query.
         self.app_ffn = nn.Sequential(
             nn.Linear(reid_dim, reid_dim),
@@ -1367,47 +1362,53 @@ class DenseReIDHead(nn.Module):
         )
         self.q_content  = nn.Linear(hidden_dim, reid_dim)
         self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
- 
+
         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
- 
-    # ---- field duy nhất: Value + reid_dense + nguồn template QAM ------------
+
+    # ---- field duy nhất: Value + reid_dense + dense-CE/cons + template QAM ---
     def build_emb_map(self, reid_feat, c1=None):
         x = reid_feat
         if self.use_s4_dense and c1 is not None:
             x = self.s4_fuse(c1, reid_feat)          # -> [B, hidden_dim, H4, W4]
         x = self.in_proj(x)                          # -> [B, reid_dim,  H,  W]
         return self.dense_tower(x)                   # -> [B, reid_dim,  H,  W]
- 
-    # ---- Value cho deform-attn = chính emb_map (đúng format core mong đợi) ---
+
+    # ---- Value cho deform-attn = chính emb_map (đúng format core) -----------
     def _build_value(self, emb_map):
         B, C, H, W = emb_map.shape
         v = emb_map.flatten(2).permute(0, 2, 1)              # [B, HW, C]
         hd = C // self.num_heads
         v = v.reshape(B, H * W, self.num_heads, hd).permute(0, 2, 3, 1).contiguous()
         return [v], [[H, W]]                                 # [B, nh, hd, HW], shapes
- 
+
     def forward(self, query, boxes, reid_feat, c1=None, return_dense=False):
         # (1) DECOUPLED: cắt gradient về trunk (forward value KHÔNG đổi).
         if self.detach_input:
             reid_feat = reid_feat.detach()
             if c1 is not None:
                 c1 = c1.detach()
- 
+
         emb_map = self.build_emb_map(reid_feat, c1)          # field duy nhất
         value_list, spatial_shapes = self._build_value(emb_map)
- 
+
         # query -> CHỈ định vị điểm sample quanh box.
         q_in = self.norm_q(self.q_proj(query))
-        app  = self.norm_attn(self.deform_attn(
-            q_in, boxes.unsqueeze(2), value_list, spatial_shapes))   # [B,Nq,reid_dim]
- 
+        # app_raw = mẫu THUẦN của emb_map tại box (chưa norm/ffn/query)
+        #         -> đích sạch cho dense `cons`, cùng không gian với `dense`.
+        app_raw = self.deform_attn(q_in, boxes.unsqueeze(2), value_list, spatial_shapes)
+        app = self.norm_attn(app_raw)
+
         # (4) emb = appearance chủ đạo + residual có cổng từ query.
         app     = app + self.app_ffn(app)
         emb_raw = app + self.query_gate * self.q_content(query)
- 
-        out = {'emb': self.neck(emb_raw), 'emb_raw': emb_raw}
+
+        out = {
+            'emb':     self.neck(emb_raw),    # cosine BYTE + CE/eval
+            'emb_raw': emb_raw,               # triplet (pre-neck)
+            'emb_app': app_raw,               # đích cho dense cons (emb_map-space)
+        }
         if return_dense:
-            out['emb_map'] = emb_map     # -> model gán out['reid_dense'] = emb_map cho QAM
+            out['emb_map'] = emb_map          # -> model: out['reid_dense'] = emb_map (QAM)
         return out
 
 
@@ -1527,7 +1528,8 @@ class FalconJDEModel(nn.Module):
             )
             out['pred_reid']     = reid_out['emb']      # post-neck -> CE + eval
             out['pred_reid_raw'] = reid_out['emb_raw']  # pre-neck  -> triplet
-    
+            if self.training:
+                out['pred_reid_app'] = reid_out['emb_app']
             if 'emb_map' in reid_out:
                 if self.training:
                     out['pred_reid_map'] = reid_out['emb_map']        # [B,D,H,W] cho dense loss
