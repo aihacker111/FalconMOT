@@ -723,6 +723,11 @@ class FalconJDECriterion(nn.Module):
         s_id_init:           float = 1.85,
         w_dense_ce:          float = 0.5,
         w_cons:              float = 0.1,
+        # ----- Cross-frame QAM (A+B+C) -----
+        qam_corr_tau:        float = 0.07,
+        qam_w_corr:          float = 1.0,
+        qam_w_distr:         float = 0.5,
+        qam_w_ent:           float = 0.1,
     ):
         super().__init__()
         self.matcher             = matcher
@@ -741,6 +746,10 @@ class FalconJDECriterion(nn.Module):
         self.use_arcface         = use_arcface
         self.w_dense_ce          = w_dense_ce
         self.w_cons              = w_cons
+        self.qam_corr_tau        = qam_corr_tau
+        self.qam_w_corr          = qam_w_corr
+        self.qam_w_distr         = qam_w_distr
+        self.qam_w_ent           = qam_w_ent
 
         self.weight_dict = weight_dict or {
             'loss_mal':  1.0,

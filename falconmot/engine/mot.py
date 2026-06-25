@@ -185,31 +185,78 @@ def _build_criterion(opt) -> FalconJDECriterion:
     )
 
 
-class FalconJDEWithLoss(nn.Module):
-    """Gộp model + criterion thành một forward cho DataParallel."""
+# class FalconJDEWithLoss(nn.Module):
+#     """Gộp model + criterion thành một forward cho DataParallel."""
 
+#     def __init__(self, model, criterion):
+#         super().__init__()
+#         self.model = model
+#         self.criterion = criterion
+
+#     def forward(self, batch, epoch=0):
+#         B = batch['input'].shape[0]
+#         targets = []
+#         for i in range(B):
+#             n = int(batch['detr_num_objs'][i].item())
+#             valid_labels = batch['detr_labels'][i, :n]
+#             valid_boxes = batch['detr_boxes'][i, :n]
+#             valid_tids = batch['detr_track_ids'][i, :n]
+#             keep = valid_labels >= 0
+#             targets.append({
+#                 'labels':    valid_labels[keep],
+#                 'boxes':     valid_boxes[keep],
+#                 'track_ids': valid_tids[keep],
+#             })
+
+#         outputs = self.model(batch['input'], targets)
+#         loss_dict = self.criterion(outputs, targets, epoch=epoch)
+#         return outputs, loss_dict['loss'], loss_dict
+
+class FalconJDEWithLoss(nn.Module):
+    """Gộp model + criterion. Khi batch có 'input2' -> forward cả 2 frame
+    (mỗi frame train detection+reid bình thường) + cross-frame QAM (A+B+C)."""
+ 
     def __init__(self, model, criterion):
         super().__init__()
         self.model = model
         self.criterion = criterion
-
-    def forward(self, batch, epoch=0):
+ 
+    @staticmethod
+    def _targets(batch, sfx=''):
         B = batch['input'].shape[0]
-        targets = []
+        tg = []
         for i in range(B):
-            n = int(batch['detr_num_objs'][i].item())
-            valid_labels = batch['detr_labels'][i, :n]
-            valid_boxes = batch['detr_boxes'][i, :n]
-            valid_tids = batch['detr_track_ids'][i, :n]
-            keep = valid_labels >= 0
-            targets.append({
-                'labels':    valid_labels[keep],
-                'boxes':     valid_boxes[keep],
-                'track_ids': valid_tids[keep],
-            })
-
+            n = int(batch[f'detr_num_objs{sfx}'][i].item())
+            lab = batch[f'detr_labels{sfx}'][i, :n]
+            box = batch[f'detr_boxes{sfx}'][i, :n]
+            tid = batch[f'detr_track_ids{sfx}'][i, :n]
+            keep = lab >= 0
+            tg.append({'labels': lab[keep], 'boxes': box[keep], 'track_ids': tid[keep]})
+        return tg
+ 
+    def forward(self, batch, epoch=0):
+        targets = self._targets(batch, '')
         outputs = self.model(batch['input'], targets)
         loss_dict = self.criterion(outputs, targets, epoch=epoch)
+ 
+        if 'input2' in batch:
+            from falconmot.models.falcon_jde.qam_corr import qam_cross_frame_loss
+            targets2 = self._targets(batch, '2')
+            outputs2 = self.model(batch['input2'], targets2)
+            loss_dict2 = self.criterion(outputs2, targets2, epoch=epoch)
+            # frame t+1 cũng train detection+reid bình thường (thêm dữ liệu)
+            loss_dict['loss'] = loss_dict['loss'] + loss_dict2['loss']
+            # cross-frame A+B+C (nặn emb_map cho đúng cơ chế QAM)
+            c = self.criterion
+            q = qam_cross_frame_loss(
+                outputs, outputs2, targets, targets2,
+                tau=getattr(c, 'qam_corr_tau', 0.07),
+                w_corr=getattr(c, 'qam_w_corr', 1.0),
+                w_distr=getattr(c, 'qam_w_distr', 0.5),
+                w_ent=getattr(c, 'qam_w_ent', 0.1))
+            loss_dict['loss'] = loss_dict['loss'] + q['loss_qam_corr'] \
+                                + q['loss_qam_distr'] + q['loss_qam_ent']
+            loss_dict.update(q)
         return outputs, loss_dict['loss'], loss_dict
 
 
@@ -222,6 +269,9 @@ class MotTrainer(BaseTrainer):
         if getattr(opt, 'use_reid', True) and getattr(opt, 'id_weight', 1.0) > 0:
             loss_states += ['loss_reid', 's_det', 's_id']
 
+        # ── Cross-frame QAM (A+B+C) — chỉ log khi bật mode ──
+        if getattr(opt, 'train_qam_corr', False):
+            loss_states += ['loss_qam_corr', 'loss_qam_distr', 'loss_qam_ent']
         # Detection: hiện main + TỪNG tầng decoder aux riêng để dễ theo dõi.
         # (tầng cuối/main không có loss_ddf vì nó đóng vai teacher của DDF)
         main_keys = ['loss_mal', 'loss_bbox', 'loss_giou', 'loss_fgl']
