@@ -349,7 +349,7 @@ class opts(object):
         self.parser.add_argument('--reid_use_s4_dense', action='store_true',
                       help='Dense ReID map ở stride-4 (object nhỏ). Cần c1=_s4_feat.')
         self.parser.add_argument('--reid_w_dense_ce', type=float, default=1.0)
-        self.parser.add_argument('--reid_w_cons',     type=float, default=0.2)
+        self.parser.add_argument('--reid_w_cons',     type=float, default=0.5)
 
 
         self.parser.add_argument('--train_qam_corr', action='store_true',
