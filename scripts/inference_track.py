@@ -520,7 +520,7 @@ class FastVideoTracker:
                 ratio_x=rx, ratio_y=ry, pad_w=pad_w, pad_h=pad_h,
             )
 
-        online_targets = self.tracker.update(dets)
+        online_targets = self.tracker.update(dets, h_orig=orig_h, w_orig=orig_w)
 
         frame_results = []
         for cls_id, tracks in online_targets.items():
