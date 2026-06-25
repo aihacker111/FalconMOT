@@ -354,7 +354,7 @@ class opts(object):
         self.parser.add_argument('--reid_use_s4_dense', action='store_true',
                       help='Dense ReID map ở stride-4 (object nhỏ). Cần c1=_s4_feat.')
         self.parser.add_argument('--reid_w_dense_ce', type=float, default=0.5)
-        self.parser.add_argument('--reid_w_cons',     type=float, default=0.5)
+        self.parser.add_argument('--reid_w_cons',     type=float, default=0.2)
         # ── Distributed ────────────────────────────────────────────────────
         self.parser.add_argument('--local-rank', type=int, default=0)
 
