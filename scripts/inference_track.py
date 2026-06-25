@@ -398,8 +398,8 @@ from falconmot.opts import opts
 # CẤU HÌNH CLASS MAP
 # ==========================================
 MERGED_CLS_MAP = {
-    1: 'pedestrian', 2: 'bicycle', 3: 'car', 4: 'truck',
-    5: 'tricycle', 6: 'bus', 7: 'motor'
+    1: 'pedestrian', 2: 'bicycle', 3: 'car', 4: 'van',
+    5: 'truck', 6: 'bus', 7: 'motor'
 }
 # Model output (cls_id) 0-indexed
 CLS_NAMES_0_IDX = {k - 1: v for k, v in MERGED_CLS_MAP.items()}
