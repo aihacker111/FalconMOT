@@ -112,81 +112,28 @@ def apply_phase0(model):
     _report(model)
 
 
-# def apply_phase1(model, keep_backbone_frozen: bool = False, freeze_norm: bool = False):
-#     """Unfreeze encoder + decoder (+ S4). Optionally keep backbone frozen.
-#     If freeze_norm, BatchNorm running-stats in encoder/S4 stay locked (eval) to
-#     avoid eval-time drift under heavy augmentation, while their weights train."""
-#     print('[stage] === Phase 1: joint fine-tune ===')
-#     m = _core(model)
-#     _set_module_trainable(m.backbone, not keep_backbone_frozen, 'backbone')
-#     _set_module_trainable(m.encoder, True, 'encoder')
-#     _set_module_trainable(m.decoder, True, 'decoder')
-#     if getattr(m, 'use_s4', False):
-#         _set_module_trainable(m.s4_branch, True, 's4_branch')
-#         _set_module_trainable(m.s4_aux_head, True, 's4_aux_head')
-#     if _has_reid_head(model):
-#         _set_module_trainable(m.reid_head, True, 'reid_head')
-
-#     if freeze_norm:
-#         # Call AFTER _set_module_trainable (which re-enables .train()); this
-#         # re-locks only the BN running-stats, leaving affine weights trainable.
-#         freeze_bn_stats(m.encoder, 'encoder')
-#         if getattr(m, 'use_s4', False):
-#             freeze_bn_stats(m.s4_branch, 's4_branch')
-#             freeze_bn_stats(m.s4_aux_head, 's4_aux_head')
-#     _report(model)
-
-
-def apply_phase1(model, keep_backbone_frozen: bool = True, freeze_norm: bool = True):
-    """
-    Stage 2 - Phase 1 (Joint fine-tune):
-    - Đóng băng Backbone (Tùy chọn, mặc định True).
-    - Mở khóa Encoder & S4 Branch để học ReID.
-    - DECODER: Partial Unfreeze (Khóa Transformer, Mở khóa Prediction Heads).
-    - Mở khóa ReID Head.
-    """
-    print('[stage] === Phase 1: joint fine-tune (PARTIAL UNFREEZE DECODER) ===')
+def apply_phase1(model, keep_backbone_frozen: bool = False, freeze_norm: bool = False):
+    """Unfreeze encoder + decoder (+ S4). Optionally keep backbone frozen.
+    If freeze_norm, BatchNorm running-stats in encoder/S4 stay locked (eval) to
+    avoid eval-time drift under heavy augmentation, while their weights train."""
+    print('[stage] === Phase 1: joint fine-tune ===')
     m = _core(model)
-    
-    # 1. Backbone
     _set_module_trainable(m.backbone, not keep_backbone_frozen, 'backbone')
-    
-    # 2. Encoder & S4 Branch
     _set_module_trainable(m.encoder, True, 'encoder')
+    _set_module_trainable(m.decoder, True, 'decoder')
     if getattr(m, 'use_s4', False):
         _set_module_trainable(m.s4_branch, True, 's4_branch')
         _set_module_trainable(m.s4_aux_head, True, 's4_aux_head')
-
-    # -------------------------------------------------------------------
-    # 3. DECODER: PARTIAL UNFREEZE (Mở khóa có chọn lọc)
-    # -------------------------------------------------------------------
-    # a. Khóa chặt khối Transformer Attention (Não bộ) để không quên kiến thức Stage 1
-    _set_module_trainable(m.decoder.decoder, False, 'dec_transformer')
-    
-    # b. Mở khóa các Head dự đoán cuối cùng (Tay chân) để nắn chỉnh lại Bbox/Score cho Video
-    _set_module_trainable(m.decoder.dec_score_head, True, 'dec_score_head')
-    _set_module_trainable(m.decoder.dec_bbox_head, True, 'dec_bbox_head')
-    
-    # Mở khóa thêm các Head phụ trợ của Encoder/Pre-decoder (nếu có)
-    if hasattr(m.decoder, 'pre_bbox_head'):
-        _set_module_trainable(m.decoder.pre_bbox_head, True, 'pre_bbox_head')
-    if hasattr(m.decoder, 'enc_score_head'):
-        _set_module_trainable(m.decoder.enc_score_head, True, 'enc_score_head')
-    if hasattr(m.decoder, 'enc_bbox_head'):
-        _set_module_trainable(m.decoder.enc_bbox_head, True, 'enc_bbox_head')
-    # -------------------------------------------------------------------
-
-    # 4. ReID Head
     if _has_reid_head(model):
         _set_module_trainable(m.reid_head, True, 'reid_head')
 
-    # 5. Khóa BatchNorm Statistics (Tránh Domain Drift trên Video)
     if freeze_norm:
+        # Call AFTER _set_module_trainable (which re-enables .train()); this
+        # re-locks only the BN running-stats, leaving affine weights trainable.
         freeze_bn_stats(m.encoder, 'encoder')
         if getattr(m, 'use_s4', False):
             freeze_bn_stats(m.s4_branch, 's4_branch')
             freeze_bn_stats(m.s4_aux_head, 's4_aux_head')
-            
     _report(model)
 
 
