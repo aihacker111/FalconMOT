@@ -90,7 +90,7 @@ class ECDetSequenceRunner5cls:
         # Tracker runs in the 5-class space (after remap); num_classes=5 ensures
         # track_id offset = cls_5idx * 1_000_000, matching the GT side.
         opt_tracker        = type('Opt', (), dict(vars(opt)))()   # shallow copy
-        opt_tracker.num_classes = NUM_CLS_EVAL
+        opt_tracker.num_classes = NUM_CLS_EVAL_COMPETITION
         self.tracker = MCJDETracker(opt_tracker, frame_rate)
 
         self.timer       = Timer()
