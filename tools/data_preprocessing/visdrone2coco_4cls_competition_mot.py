@@ -31,23 +31,25 @@ from tqdm import tqdm
 
 # ── Class mapping 4 class competition (1-indexed target) ─────────────────────
 TARGET_CLS_MAP = {
-    1: 'person', 2: 'car', 3: 'motorcycle', 4: 'bicycle'
+    1: 'pedestrian', 2: 'bicycle', 3: 'car', 4: 'motor'
 }
 NUM_CLASSES = len(TARGET_CLS_MAP)
 
 # VisDrone original 1-indexed -> 4-class target (None = DROP)
 #   1 pedestrian  2 people  3 bicycle  4 car   5 van
 #   6 truck       7 tricycle 8 awning-tricycle 9 bus 10 motor
-CLASS_MAPPING = {
-    1: 1, 2: 1,      # pedestrian, people     -> person      (1)
-    3: 4,            # bicycle                -> bicycle     (4)
-    4: 2,            # car                    -> car         (2)
-    5: None,         # van                    -> DROP
-    6: None,         # truck                  -> DROP
-    7: None,         # tricycle               -> DROP
-    8: None,         # awning-tricycle        -> DROP
-    9: None,         # bus                    -> DROP
-    10: 3,           # motor                  -> motorcycle  (3)
+# old cat_id → new cat_id  (None = DROP)
+CLASS_MAPPING: dict[int, int | None] = {
+    1: 1,       # pedestrian → pedestrian
+    2: 1,       # people     → pedestrian  (merge)
+    3: 2,    # bicycle    → DROP
+    4: 3,       # car        → car
+    5: None,       # van        → van
+    6: None,       # truck      → DROP
+    7: None,    # tricycle   → DROP
+    8: None,    # awning-tri → DROP
+    9: None,       # bus        → DROP
+    10: 4,   # motor      → DROP
 }
 
 
