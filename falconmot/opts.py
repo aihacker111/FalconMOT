@@ -350,16 +350,6 @@ class opts(object):
                       help='Dense ReID map ở stride-4 (object nhỏ). Cần c1=_s4_feat.')
         self.parser.add_argument('--reid_w_dense_ce', type=float, default=1.0)
         self.parser.add_argument('--reid_w_cons',     type=float, default=0.5)
-
-
-        self.parser.add_argument('--train_qam_corr', action='store_true',
-            help='Bật stage cross-frame QAM (A+B+C). Cần sequence + track_id.')
-        self.parser.add_argument('--qam_pair_gap', type=int,   default=1,
-            help='Lấy cặp frame t -> t+gap trong cùng sequence.')
-        self.parser.add_argument('--qam_corr_tau', type=float, default=0.07)
-        self.parser.add_argument('--qam_w_corr',   type=float, default=1.0)  # A
-        self.parser.add_argument('--qam_w_distr',  type=float, default=0.5)  # B
-        self.parser.add_argument('--qam_w_ent',    type=float, default=0.1)  # C
         # nâng LR cho nhánh reid (gồm emb_map mà A+B+C nặn). init lr=1e-4:
         self.parser.add_argument('--reid_lr_factor', type=float, default=3.0)
         # ── Distributed ────────────────────────────────────────────────────
