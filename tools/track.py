@@ -43,7 +43,7 @@ from tqdm import tqdm
 import _paths  # noqa: F401  (sys.path bootstrap)
 from falconmot import create_model, load_model
 from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
-from falconmot.tracker import FalconTracker, Track
+from falconmot.tracker.multitracker import MCJDETracker, MCTrack
 from falconmot.tracker.utils import visualization as vis
 from falconmot.tracker.utils.timer import Timer
 from falconmot.cfg import opts
@@ -101,7 +101,7 @@ class FalconVideoTracker:
         if self.use_letterbox:
             self.postprocessor.set_net_hw(self.net_h, self.net_w)
 
-        self.tracker = FalconTracker(opt, frame_rate=video_fps)
+        self.tracker = MCJDETracker(opt, frame_rate=video_fps)
         self.timer = Timer()
         self._orig_sizes = None
 
@@ -150,7 +150,7 @@ class FalconVideoTracker:
             cls_id = int(labels[i])
             tlwh = np.array([boxes[i, 0], boxes[i, 1], ws[i], hs[i]], dtype=np.float32)
             emb = reid[i] if reid is not None else np.zeros(1, dtype=np.float32)
-            dets[cls_id].append(Track(tlwh, float(scores[i]), emb, self.num_cls, cls_id))
+            dets[cls_id].append(MCTrack(tlwh, float(scores[i]), emb, self.num_cls, cls_id))
         return dets
 
     def get_tracks_for_frame(self, frame_bgr):
