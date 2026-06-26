@@ -158,7 +158,7 @@ class ECDetSequenceRunner5cls:
                     res    = self.postprocessor(output, self._orig_sizes)[0]
                     dets_7cls = self._decode_detections(res)
                     # ── KEY: remap 7cls -> 5cls, drop bicycle(1) + motor(6) ──
-                    dets_5cls = remap_dets_7cls_to_5cls(dets_7cls)
+                    dets_5cls = remap_dets_7cls_to_4cls(dets_7cls)
                 self.timer.toc()
 
                 self.tracker.set_image(img0)
