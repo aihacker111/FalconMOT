@@ -58,7 +58,7 @@ _RESULT_FMT = '{frame},{id},{x1:.2f},{y1:.2f},{w:.2f},{h:.2f},{score:.4f},{cls_i
 
 
 class ECDetSequenceRunner5cls:
-    """Runner with a built-in 7->5 class remap.
+    """Runner with a built-in 7->4 class remap.
 
     Differences from the base sequence runner:
       1. Tracker is initialised with NUM_CLS_TRAIN=7 (unchanged; the tracker is unaware of the remap).
@@ -66,7 +66,7 @@ class ECDetSequenceRunner5cls:
          shifts the class index before feeding the tracker.
       3. When writing the result file, cls_id is a 5-class index (1-indexed).
       4. num_cls in MCTrack is set to NUM_CLS_EVAL so the track_id offset
-         is computed over 5 classes only.
+         is computed over 4 classes only.
     """
 
     def __init__(self, opt, frame_rate: int = 30):
@@ -189,17 +189,17 @@ class ECDetSequenceRunner5cls:
                 tlwhs, tids, tscores = self._collect_tracks(online_targets)
 
                 # Write result: cls_id 0-indexed -> 1-indexed to match the MOT format
-                for cls5_0idx in range(NUM_CLS_EVAL_COMPETITION):
+                for cls4_0idx in range(NUM_CLS_EVAL_COMPETITION):
                     for tlwh, tid, sc in zip(
-                            tlwhs[cls5_0idx], tids[cls5_0idx], tscores[cls5_0idx]):
+                            tlwhs[cls4_0idx], tids[cls4_0idx], tscores[cls4_0idx]):
                         if tid < 0:
                             continue
                         f_out.write(_RESULT_FMT.format(
                             frame=frame_id,
-                            id=tid + cls5_0idx * _CLS_ID_OFFSET,
+                            id=tid + cls4_0idx * _CLS_ID_OFFSET,
                             x1=tlwh[0], y1=tlwh[1], w=tlwh[2], h=tlwh[3],
                             score=sc,
-                            cls_id=cls5_0idx + 1,   # 1-indexed
+                            cls_id=cls4_0idx + 1,   # 1-indexed
                         ))
 
                 if show_image or save_dir:
@@ -251,7 +251,7 @@ def main(opt, ann_file: str, img_root: str, exp_name: str,
         timer_avgs.append(ta)
         timer_calls.append(tc)
 
-        # Evaluate against COCO JSON GT (5 classes); no raw .txt needed
+        # Evaluate against COCO JSON GT (4 classes); no raw .txt needed
         evaluator = CocoGTEvaluator(ann_file, seq_id)
         acc = evaluator.eval_file(result_filename)
         accs.append(acc)
@@ -265,7 +265,7 @@ def main(opt, ann_file: str, img_root: str, exp_name: str,
     avg_fps     = 1.0 / max(all_time / max(np.sum(timer_calls), 1), 1e-5)
     logger.info('Total %.2fs  FPS %.2f', all_time, avg_fps)
 
-    print(f'\n[Eval] 5-class benchmark: {" / ".join(CLS5_NAMES.values())}')
+    print(f'\n[Eval] 4-class benchmark: {" / ".join(CLS4_NAMES.values())}')
     metrics = mm.metrics.motchallenge_metrics
     mh      = mm.metrics.create()
     summary = mh.compute_many(accs, metrics=metrics, names=names, generate_overall=True)
