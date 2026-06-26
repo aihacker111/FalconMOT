@@ -190,7 +190,7 @@ class FalconJDEPostProcessor(nn.Module):
 
             sc  = topk_scores[b]
             lbl = labels[b]
-            
+
             # ── 3. Confidence filter (tracking mode) ─────────────────────
             if self.conf_thres > 0:
                 keep       = sc >= self.conf_thres
@@ -203,7 +203,7 @@ class FalconJDEPostProcessor(nn.Module):
                 # BỘ LỌC EMBEDDING-AWARE NMS 
                 # (Chạy sau khi đã lọc conf_thres để giảm khối lượng tính toán)
                 # =========================================================
-                boxes_xyxy, sc, lbl, reid_b = embedding_aware_nms(
+                boxes_xyxy, sc, lbl, reid_b = self.embedding_aware_nms(
                     boxes=boxes_xyxy, 
                     scores=sc, 
                     labels=lbl, 
