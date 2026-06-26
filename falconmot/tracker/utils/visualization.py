@@ -7,7 +7,7 @@ were unused and have been removed.
 
 import cv2
 import numpy as np
-
+import os
 
 def mkdir_if_missing(d):
     """Create directory `d` (and parents) if it does not already exist."""
