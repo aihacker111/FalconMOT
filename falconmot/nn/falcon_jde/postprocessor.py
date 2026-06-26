@@ -53,54 +53,50 @@ class FalconJDEPostProcessor(nn.Module):
         """Call once before tracking inference to enable letterbox-inverse."""
         self._net_hw = (net_h, net_w)
 
-    def embedding_aware_nms(self, boxes, scores, labels, reid_feats=None, iou_thresh=0.80, emb_thresh=0.85):
+    def embedding_aware_nms(self, boxes, scores, labels, reid_feats=None, iou_thresh=0.65, emb_thresh=0.85):
         """
-        Hàm lọc các bounding box trùng lặp (Duplicate Queries) cho hệ DETR/DEIM 
-        dựa trên cả hình học (IoU) và đặc trưng nhận diện ngoại hình (Embedding).
-        Tính toán song song trực tiếp trên GPU thông qua PyTorch Tensor.
+        Hàm lọc trùng lặp với IoU Threshold được tinh chỉnh.
         
-        Args:
-            boxes (Tensor): Tọa độ các box [N, 4] dạng xyxy (pixel).
-            scores (Tensor): Điểm số confidence [N] (Đã được sắp xếp giảm dần từ tầng Top-K).
-            labels (Tensor): Lớp của vật thể [N].
-            reid_feats (Tensor, optional): Các vector đặc trưng ReID [N, C] (Đã được L2-normalize).
-            iou_thresh (float): Ngưỡng đè lên nhau để xét trùng lặp. mặc định 0.80.
-            emb_thresh (float): Ngưỡng độ tương đồng Cosine để xác định cùng 1 danh tính (ID).
+        Cập nhật: Cho phép truyền vào iou_thresh (mặc định 0.65 - phù hợp cho object nhỏ/đông).
         """
         if len(boxes) <= 1:
             return boxes, scores, labels, reid_feats
 
-        # 1. Tính ma trận IoU giữa tất cả các cặp box [N, N] trên GPU
+        # 1. Tính toán ma trận IoU
         iou_matrix = torchvision.ops.box_iou(boxes, boxes)
         
-        # 2. Tính ma trận Cosine Similarity giữa các cặp đặc trưng [N, N]
-        # Vì reid_feats đã được L2-normalize từ trước, phép nhân ma trận chính là Cosine Similarity
+        # 2. Tính ma trận Cosine Similarity
         sim_matrix = torch.mm(reid_feats, reid_feats.t()) if reid_feats is not None else None
         
-        # 3. Tạo ma trận mặt nạ kiểm tra xem các cặp box có cùng Class không [N, N]
+        # 3. Tạo mask cùng class
         same_cls_matrix = (labels.unsqueeze(1) == labels.unsqueeze(0))
         
         num_dets = len(scores)
         keep_mask = torch.ones(num_dets, dtype=torch.bool, device=scores.device)
         
-        # Duyệt từ trên xuống dưới (Ưu tiên những thằng điểm cao nhất vì mảng đã được sort từ trước)
+        # Duyệt NMS
         for i in range(num_dets):
             if not keep_mask[i]:
                 continue
             
-            # Điều kiện trùng lặp cơ bản: Cùng lớp VÀ có độ đè pixel (IoU) cao vượt ngưỡng
+            # LOGIC MỚI: 
+            # Kết hợp IoU cao (chồng lấp nhiều) VÀ ReID giống nhau (cùng 1 thực thể)
+            # Nếu IoU cao NHƯNG ReID khác nhau -> Giữ lại (khả năng là 2 người sát nhau)
+            
+            # Điều kiện triệt tiêu: 
+            # (Cùng lớp) AND (IoU > ngưỡng) AND (Cùng ID/Ngoại hình giống nhau)
             duplicate_cond = keep_mask & same_cls_matrix[i] & (iou_matrix[i] > iou_thresh)
             
-            # Nếu có đặc trưng ReID, kiểm tra xem ngoại hình có thực sự giống hệt nhau không
             if sim_matrix is not None:
+                # Chỉ loại bỏ nếu ngoại hình rất giống nhau (> emb_thresh)
                 duplicate_cond = duplicate_cond & (sim_matrix[i] > emb_thresh)
-                
-            # Loại bỏ chính nó ra khỏi điều kiện triệt tiêu
+            
+            # Không tự xóa chính nó
             duplicate_cond[i] = False
             
-            # Đánh dấu loại bỏ các box trùng lặp có điểm thấp hơn ở phía sau
+            # Đánh dấu những thằng bị trùng
             keep_mask[duplicate_cond] = False
-            
+                
         return (
             boxes[keep_mask], 
             scores[keep_mask], 
@@ -208,7 +204,7 @@ class FalconJDEPostProcessor(nn.Module):
                     scores=sc, 
                     labels=lbl, 
                     reid_feats=reid_b, 
-                    iou_thresh=0.80, 
+                    iou_thresh=0.6, 
                     emb_thresh=0.85
                 )
                 # =========================================================
