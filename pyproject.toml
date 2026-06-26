@@ -1,12 +1,38 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "falconmot"
-version = "0.1.0"
-description = "FalconMOT — UAV edge multi-object detection & tracking (FalconJDE + clean online tracker)"
-requires-python = ">=3.8"
+version = "1.0.0"
+description = "DINOv3-backbone JDE tracker for multi-object tracking in drone video"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["multi-object-tracking", "MOT", "drone", "UAV", "VisDrone", "DINOv3", "JDE"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "numpy>=1.24",
+    "opencv-python>=4.7",
+    "scipy>=1.10",
+    "tqdm>=4.65",
+    "progress>=1.6",
+    "pycocotools>=2.0.7",
+    "faster-coco-eval>=1.5",
+    "motmetrics>=1.4",
+    "lap>=0.4",
+    "cython_bbox>=0.1.3",
+]
+
+[project.optional-dependencies]
+onnx = ["onnx>=1.15", "onnxruntime>=1.16"]
+sparse = ["xformers>=0.0.23"]
 
 [tool.setuptools.packages.find]
-include = ["falconmot*"]
+include = ["falconmot", "falconmot.*"]

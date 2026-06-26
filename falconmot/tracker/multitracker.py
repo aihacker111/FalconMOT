@@ -11,8 +11,8 @@ from collections import deque, defaultdict
 import numpy as np
 
 from falconmot.tracker import matching
-from falconmot.tracking_utils.kalman_filter import KalmanFilter
-from falconmot.tracking_utils.gmc import GMC
+from falconmot.tracker.kalman_filter import KalmanFilter
+from falconmot.tracker.gmc import GMC
 from .basetrack import MCBaseTrack, TrackState
 
 # VisDrone 10-class id -> name (used for visualisation / debugging)

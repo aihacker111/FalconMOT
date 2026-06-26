@@ -1,0 +1,27 @@
+# Core runtime dependencies for FalconMOT
+# (install a CUDA-matched torch/torchvision build from https://pytorch.org first
+#  if you need GPU support; the versions below are minimums known to work)
+
+torch>=2.1
+torchvision>=0.16
+numpy>=1.24
+opencv-python>=4.7
+scipy>=1.10
+tqdm>=4.65
+progress>=1.6
+
+# Detection / MOT evaluation
+pycocotools>=2.0.7
+faster-coco-eval>=1.5
+motmetrics>=1.4
+lap>=0.4
+cython_bbox>=0.1.3
+
+# --- Optional ---------------------------------------------------------------
+# ONNX export / inference (tools/export_onnx.py, tools/infer_onnx.py)
+# onnx>=1.15
+# onnxruntime>=1.16          # or onnxruntime-gpu
+
+# 2:4-sparse DINOv3 linear layer (falconmot/.../dinov3/layers/sparse_linear.py).
+# Not used by the default model path; install only if you enable sparse layers.
+# xformers>=0.0.23

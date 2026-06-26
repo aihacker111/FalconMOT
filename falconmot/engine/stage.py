@@ -12,8 +12,6 @@ Phase 1  (joint):        unfreeze encoder + decoder (+ S4 branch), keep backbone
 The optimizer (+ criterion params) and LR scheduler are rebuilt automatically at
 the phase boundary, because the set of trainable params changes.
 """
-from __future__ import absolute_import, division, print_function
-
 import copy
 import torch
 import torch.nn as nn
