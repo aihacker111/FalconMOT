@@ -90,7 +90,7 @@ class ECDetSequenceRunner5cls:
         # Tracker runs in the 5-class space (after remap); num_classes=5 ensures
         # track_id offset = cls_5idx * 1_000_000, matching the GT side.
         opt_tracker        = type('Opt', (), dict(vars(opt)))()   # shallow copy
-        opt_tracker.num_classes = NUM_CLS_EVAL
+        opt_tracker.num_classes = NUM_CLS_EVAL_BENCHMARK
         self.tracker = MCJDETracker(opt_tracker, frame_rate)
 
         self.timer       = Timer()
@@ -116,7 +116,7 @@ class ECDetSequenceRunner5cls:
             tlwh   = np.array([boxes_np[i, 0], boxes_np[i, 1], ws[i], hs[i]], dtype=np.float32)
             emb    = reid_np[i] if reid_np is not None else np.zeros(1, dtype=np.float32)
             # num_classes=NUM_CLS_EVAL: track_id counter keyed per 5cls slot
-            dets[cls_id].append(MCTrack(tlwh, float(scores_np[i]), emb, NUM_CLS_EVAL, cls_id))
+            dets[cls_id].append(MCTrack(tlwh, float(scores_np[i]), emb, NUM_CLS_EVAL_BENCHMARK, cls_id))
         return dets
 
     def _collect_tracks(self, online_targets_dict: dict):
@@ -189,7 +189,7 @@ class ECDetSequenceRunner5cls:
                 tlwhs, tids, tscores = self._collect_tracks(online_targets)
 
                 # Write result: cls_id 0-indexed -> 1-indexed to match the MOT format
-                for cls5_0idx in range(NUM_CLS_EVAL):
+                for cls5_0idx in range(NUM_CLS_EVAL_BENCHMARK):
                     for tlwh, tid, sc in zip(
                             tlwhs[cls5_0idx], tids[cls5_0idx], tscores[cls5_0idx]):
                         if tid < 0:
@@ -207,7 +207,7 @@ class ECDetSequenceRunner5cls:
                         image=img0,
                         tlwhs_dict=tlwhs,
                         obj_ids_dict=tids,
-                        num_classes=NUM_CLS_EVAL,
+                        num_classes=NUM_CLS_EVAL_BENCHMARK,
                         scores=tscores,
                         frame_id=frame_id,
                         fps=1.0 / max(1e-5, self.timer.average_time),
