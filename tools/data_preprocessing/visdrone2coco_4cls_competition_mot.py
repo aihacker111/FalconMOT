@@ -31,7 +31,10 @@ from tqdm import tqdm
 
 # ── Class mapping 4 class competition (1-indexed target) ─────────────────────
 TARGET_CLS_MAP = {
-    1: 'pedestrian', 2: 'bicycle', 3: 'car', 4: 'motor'
+    1: 'pedestrian', 
+    2: 'bicycle', 
+    3: 'car', 
+    4: 'motor'
 }
 NUM_CLASSES = len(TARGET_CLS_MAP)
 
