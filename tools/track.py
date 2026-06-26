@@ -41,12 +41,12 @@ import torch
 from tqdm import tqdm
 
 import _paths  # noqa: F401  (sys.path bootstrap)
-from falconmot.models.model import create_model, load_model
-from falconmot.models.falcon_jde.postprocessor import FalconJDEPostProcessor
+from falconmot import create_model, load_model
+from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
 from falconmot.tracker import FalconTracker, Track
-from falconmot.tracking_utils import visualization as vis
-from falconmot.tracking_utils.timer import Timer
-from falconmot.opts import opts
+from falconmot.tracker.utils import visualization as vis
+from falconmot.tracker.utils.timer import Timer
+from falconmot.cfg import opts
 
 _IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 
