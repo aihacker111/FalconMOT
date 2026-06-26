@@ -289,42 +289,6 @@ class MCJDETracker(object):
             n = np.linalg.norm(f)
             d.template = (f / n) if n > 0 else f
 
-    def embedding_aware_nms(self, detections, iou_thresh=0.8, emb_thresh=0.85):
-        """
-        Lọc các detection trùng lặp dựa trên cả hình học (IoU) và ngoại hình (Embedding).
-        Args:
-            detections: list[MCTrack] các detection thô trong 1 frame.
-        Returns:
-            list[MCTrack] các detection đã được lọc.
-        """
-        if len(detections) <= 1:
-            return detections
-
-        # 1. Sắp xếp detections theo điểm số (score) giảm dần
-        detections = sorted(detections, key=lambda x: x.score, reverse=True)
-        
-        keep_dets = []
-        
-        for det in detections:
-            is_duplicate = False
-            for keep_det in keep_dets:
-                # Tính IoU (Dùng hàm bbox_overlaps từ cython_bbox hoặc viết hàm iou đơn giản)
-                # Ở đây dùng hàm ious đã có sẵn trong matching.py
-                iou = matching.ious([det.tlbr], [keep_det.tlbr])[0][0]
-                
-                if iou > iou_thresh:
-                    # Nếu đè nhau nhiều, kiểm tra thêm độ giống nhau của ReID embedding
-                    emb_sim = np.dot(det.curr_feat, keep_det.curr_feat)
-                    
-                    # Nếu IoU cao VÀ ngoại hình rất giống nhau -> Chắc chắn là do model đẻ ra 2 box cho 1 vật
-                    if emb_sim > emb_thresh:
-                        is_duplicate = True
-                        break
-            
-            if not is_duplicate:
-                keep_dets.append(det)
-                
-        return keep_dets
     def _appearance_motion(self, pool, dets):
         """Predict pool-track centres by correlation; return (d_mot, w_mot).
 
@@ -403,8 +367,7 @@ class MCJDETracker(object):
 
         for cls_id in range(self.num_classes):
             cls_detects = dets_per_class.get(cls_id, [])
-            if len(cls_detects) > 0:
-                cls_detects = self.embedding_aware_nms(cls_detects, iou_thresh=0.8, emb_thresh=0.85)
+
             unconfirmed_dict = defaultdict(list)
             tracked_tracks_dict = defaultdict(list)
             for track in self.tracked_tracks_dict[cls_id]:

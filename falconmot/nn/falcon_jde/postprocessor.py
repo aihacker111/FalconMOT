@@ -53,6 +53,60 @@ class FalconJDEPostProcessor(nn.Module):
         """Call once before tracking inference to enable letterbox-inverse."""
         self._net_hw = (net_h, net_w)
 
+    def embedding_aware_nms(self, boxes, scores, labels, reid_feats=None, iou_thresh=0.80, emb_thresh=0.85):
+        """
+        Hàm lọc các bounding box trùng lặp (Duplicate Queries) cho hệ DETR/DEIM 
+        dựa trên cả hình học (IoU) và đặc trưng nhận diện ngoại hình (Embedding).
+        Tính toán song song trực tiếp trên GPU thông qua PyTorch Tensor.
+        
+        Args:
+            boxes (Tensor): Tọa độ các box [N, 4] dạng xyxy (pixel).
+            scores (Tensor): Điểm số confidence [N] (Đã được sắp xếp giảm dần từ tầng Top-K).
+            labels (Tensor): Lớp của vật thể [N].
+            reid_feats (Tensor, optional): Các vector đặc trưng ReID [N, C] (Đã được L2-normalize).
+            iou_thresh (float): Ngưỡng đè lên nhau để xét trùng lặp. mặc định 0.80.
+            emb_thresh (float): Ngưỡng độ tương đồng Cosine để xác định cùng 1 danh tính (ID).
+        """
+        if len(boxes) <= 1:
+            return boxes, scores, labels, reid_feats
+
+        # 1. Tính ma trận IoU giữa tất cả các cặp box [N, N] trên GPU
+        iou_matrix = torchvision.ops.box_iou(boxes, boxes)
+        
+        # 2. Tính ma trận Cosine Similarity giữa các cặp đặc trưng [N, N]
+        # Vì reid_feats đã được L2-normalize từ trước, phép nhân ma trận chính là Cosine Similarity
+        sim_matrix = torch.mm(reid_feats, reid_feats.t()) if reid_feats is not None else None
+        
+        # 3. Tạo ma trận mặt nạ kiểm tra xem các cặp box có cùng Class không [N, N]
+        same_cls_matrix = (labels.unsqueeze(1) == labels.unsqueeze(0))
+        
+        num_dets = len(scores)
+        keep_mask = torch.ones(num_dets, dtype=torch.bool, device=scores.device)
+        
+        # Duyệt từ trên xuống dưới (Ưu tiên những thằng điểm cao nhất vì mảng đã được sort từ trước)
+        for i in range(num_dets):
+            if not keep_mask[i]:
+                continue
+            
+            # Điều kiện trùng lặp cơ bản: Cùng lớp VÀ có độ đè pixel (IoU) cao vượt ngưỡng
+            duplicate_cond = keep_mask & same_cls_matrix[i] & (iou_matrix[i] > iou_thresh)
+            
+            # Nếu có đặc trưng ReID, kiểm tra xem ngoại hình có thực sự giống hệt nhau không
+            if sim_matrix is not None:
+                duplicate_cond = duplicate_cond & (sim_matrix[i] > emb_thresh)
+                
+            # Loại bỏ chính nó ra khỏi điều kiện triệt tiêu
+            duplicate_cond[i] = False
+            
+            # Đánh dấu loại bỏ các box trùng lặp có điểm thấp hơn ở phía sau
+            keep_mask[duplicate_cond] = False
+            
+        return (
+            boxes[keep_mask], 
+            scores[keep_mask], 
+            labels[keep_mask], 
+            (reid_feats[keep_mask] if reid_feats is not None else None)
+        )
     @torch.no_grad()
     def forward(self, outputs: dict, orig_target_sizes: torch.Tensor,
                 lb_pad: torch.Tensor = None) -> list:
@@ -136,7 +190,7 @@ class FalconJDEPostProcessor(nn.Module):
 
             sc  = topk_scores[b]
             lbl = labels[b]
-
+            
             # ── 3. Confidence filter (tracking mode) ─────────────────────
             if self.conf_thres > 0:
                 keep       = sc >= self.conf_thres
@@ -144,6 +198,21 @@ class FalconJDEPostProcessor(nn.Module):
                 lbl        = lbl[keep]
                 boxes_xyxy = boxes_xyxy[keep]
                 reid_b     = sel_reid[b][keep] if sel_reid is not None else None
+
+                # =========================================================
+                # BỘ LỌC EMBEDDING-AWARE NMS 
+                # (Chạy sau khi đã lọc conf_thres để giảm khối lượng tính toán)
+                # =========================================================
+                boxes_xyxy, sc, lbl, reid_b = embedding_aware_nms(
+                    boxes=boxes_xyxy, 
+                    scores=sc, 
+                    labels=lbl, 
+                    reid_feats=reid_b, 
+                    iou_thresh=0.80, 
+                    emb_thresh=0.85
+                )
+                # =========================================================
+
             else:
                 reid_b = sel_reid[b] if sel_reid is not None else None
 
@@ -153,6 +222,22 @@ class FalconJDEPostProcessor(nn.Module):
             results.append(res)
 
         return results
+        #     # ── 3. Confidence filter (tracking mode) ─────────────────────
+        #     if self.conf_thres > 0:
+        #         keep       = sc >= self.conf_thres
+        #         sc         = sc[keep]
+        #         lbl        = lbl[keep]
+        #         boxes_xyxy = boxes_xyxy[keep]
+        #         reid_b     = sel_reid[b][keep] if sel_reid is not None else None
+        #     else:
+        #         reid_b = sel_reid[b] if sel_reid is not None else None
+
+        #     res = {'labels': lbl, 'boxes': boxes_xyxy, 'scores': sc}
+        #     if reid_b is not None:
+        #         res['reid'] = reid_b
+        #     results.append(res)
+
+        # return results
 
     def deploy(self):
         self.eval()
