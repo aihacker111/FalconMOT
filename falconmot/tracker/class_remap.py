@@ -46,6 +46,13 @@ CLS5_NAMES = {
     4: 'bus',
 }
 
+
+CLS4_NAMES = {
+    0: 'pedestrian',
+    1: 'bicycle',
+    2: 'car',
+    3: 'motor',
+}
 # 7cls 0-idx -> 5cls 0-idx  (None = drop)
 _REMAP_7_TO_5 = {
     0: 0,    # pedestrian -> pedestrian
@@ -57,9 +64,21 @@ _REMAP_7_TO_5 = {
     6: None, # motor      -> DROP
 }
 
-NUM_CLS_TRAIN = 7   # model head output channels
-NUM_CLS_EVAL  = 5   # benchmark GT classes
+# 7cls 0-idx -> 5cls 0-idx  (None = drop)
+_REMAP_7_TO_4 = {
+    0: 0,    # pedestrian -> pedestrian
+    1: 1, # bicycle    -> DROP
+    2: 2,    # car        -> car
+    3: None,    # van        -> van
+    4: None,    # truck      -> truck
+    5: None,    # bus        -> bus
+    6: 3, # motor      -> DROP
+}
 
+
+NUM_CLS_TRAIN = 7   # model head output channels
+NUM_CLS_EVAL_BENCHMARK  = 5   # benchmark GT classes
+NUM_CLS_EVAL_COMPETITION = 4
 
 def remap_dets_7cls_to_5cls(dets: Dict[int, List]) -> Dict[int, List]:
     """Filter & remap model detections from 7-class space to 5-class eval space.
@@ -74,6 +93,32 @@ def remap_dets_7cls_to_5cls(dets: Dict[int, List]) -> Dict[int, List]:
     out: Dict[int, List] = {}
     for cls7, track_list in dets.items():
         cls5 = _REMAP_7_TO_5.get(cls7)
+        if cls5 is None:
+            continue   # drop bicycle / motor
+
+        remapped = []
+        for t in track_list:
+            t.cls_id = cls5   # in-place patch; MCTrack.cls_id drives track-id offset
+            remapped.append(t)
+
+        out[cls5] = out.get(cls5, []) + remapped
+    return out
+
+
+
+def remap_dets_7cls_to_4cls(dets: Dict[int, List]) -> Dict[int, List]:
+    """Filter & remap model detections from 7-class space to 5-class eval space.
+
+    Args:
+        dets: dict[cls_id_7 (0-indexed)] -> list[MCTrack]
+              (output of ECDetSequenceRunner._decode_detections)
+
+    Returns:
+        dict[cls_id_5 (0-indexed)] -> list[MCTrack], with MCTrack.cls_id updated.
+    """
+    out: Dict[int, List] = {}
+    for cls7, track_list in dets.items():
+        cls5 = _REMAP_7_TO_4.get(cls7)
         if cls5 is None:
             continue   # drop bicycle / motor
 

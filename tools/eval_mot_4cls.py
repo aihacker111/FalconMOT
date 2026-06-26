@@ -1,23 +1,23 @@
-"""eval_mot_4cls.py -- Tracking + MOTMetrics evaluation on the 4-class competition split.
+"""eval_mot_5cls.py -- Tracking + MOTMetrics evaluation on the 5-class benchmark split.
 
 Model train 7 classes (visdrone2coco_7cls_mot.py):
-    0:ped  1:bicycle  2:car  3:truck  4:tricycle  5:bus  6:motor
+    0:ped  1:bicycle  2:car  3:van  4:truck  5:bus  6:motor
 
-GT test-dev 4 classes (visdrone2coco_4cls_competition_mot.py):
-    0:person  1:car  2:motorcycle  3:bicycle
+GT test-dev 4 classes (visdrone2coco_5cls_benchmark_mot.py):
+    0:ped  1:bicycle  2:car  3:motor
 
 Pipeline:
     LoadCocoSequencesForTracking (COCO JSON)
-        -> SequenceRunner4cls.run()
-            -> remap_dets_7cls_to_4cls()   ← KEY: drop truck/tricycle/bus, remap ids
-        -> CocoGTEvaluator.eval_file()     (GT from COCO JSON)
+        -> ECDetSequenceRunner.run()
+            -> remap_dets_7cls_to_5cls()   ← KEY: drop bicycle/motor, remap ids
+        -> CocoGTEvaluator.eval_file()     (GT from COCO JSON, not raw .txt)
         -> motmetrics MOTA / IDF1
 
 Input:
-    --track_img_root /data/VisDrone2019-COCO-4cls/test-dev/images
-    --track_ann_file /data/VisDrone2019-COCO-4cls/test-dev/annotations/instances_test-dev.json
-    --load_model     /path/to/checkpoint.pth
-    (+ standard FalconMOT opts: --arch, --input-wh, --conf_thres, --use_appearance_motion, ...)
+    --img_root   /data/VisDrone2019-COCO-5cls/test-dev/images
+    --ann_file   /data/VisDrone2019-COCO-5cls/test-dev/annotations/instances_test-dev.json
+    --load_model /path/to/checkpoint.pth
+    (+ standard FalconMOT opts: --arch, --input-wh, --conf_thres, etc.)
 """
 
 from __future__ import absolute_import, division, print_function
@@ -26,7 +26,6 @@ import logging
 import os
 import os.path as osp
 from collections import defaultdict
-from typing import Dict, List
 
 import cv2
 import motmetrics as mm
@@ -35,67 +34,39 @@ import torch
 
 import _paths  # noqa: F401
 
-from falconmot.models.model import create_model, load_model
-from falconmot.models.falcon_jde.postprocessor import FalconJDEPostProcessor
+from falconmot import create_model, load_model
+from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
 from falconmot.tracker.multitracker import MCJDETracker, MCTrack
-from falconmot.tracker.class_remap import NUM_CLS_TRAIN   # model head = 7 (fixed)
-from falconmot.tracking_utils import visualization as vis
-from falconmot.tracking_utils.coco_gt_reader import CocoGTEvaluator
-from falconmot.tracking_utils.log import logger
-from falconmot.tracking_utils.timer import Timer
-from falconmot.tracking_utils.utils import mkdir_if_missing
-from falconmot.datasets.dataset.coco_detection import LoadCocoSequencesForTracking
-from falconmot.opts import opts
-
-# ── 7cls model output -> 4cls competition remap (self-contained) ─────────────
-#   7cls (0-idx): 0 ped, 1 bicycle, 2 car, 3 truck, 4 tricycle, 5 bus, 6 motor
-#   4cls (0-idx): 0 person, 1 car, 2 motorcycle, 3 bicycle
-CLS4_NAMES = {0: 'person', 1: 'car', 2: 'motorcycle', 3: 'bicycle'}
-NUM_CLS_EVAL_4 = 4
-
-_REMAP_7_TO_4 = {
-    0: 0,     # pedestrian -> person
-    1: 3,     # bicycle    -> bicycle
-    2: 1,     # car        -> car
-    3: None,  # truck      -> DROP
-    4: None,  # tricycle   -> DROP
-    5: None,  # bus        -> DROP
-    6: 2,     # motor      -> motorcycle
-}
-
-
-def remap_dets_7cls_to_4cls(dets: Dict[int, List]) -> Dict[int, List]:
-    """Filter & remap detections from 7-class space to 4-class competition space.
-
-    Args:
-        dets: dict[cls_id_7 (0-indexed)] -> list[MCTrack]
-    Returns:
-        dict[cls_id_4 (0-indexed)] -> list[MCTrack], MCTrack.cls_id patched in place.
-    """
-    out: Dict[int, List] = {}
-    for cls7, track_list in dets.items():
-        cls4 = _REMAP_7_TO_4.get(cls7)
-        if cls4 is None:
-            continue   # drop truck / tricycle / bus
-        for t in track_list:
-            t.cls_id = cls4   # MCTrack.cls_id drives the per-class track-id offset
-        out[cls4] = out.get(cls4, []) + track_list
-    return out
-
+from falconmot.tracker.class_remap import (
+    remap_dets_7cls_to_4cls,
+    CLS4_NAMES,
+    NUM_CLS_TRAIN,
+    NUM_CLS_EVAL_COMPETITION,
+    SKIP_SET_AFTER_REMAP,
+)
+from falconmot.tracker.utils import mkdir_if_missing
+from falconmot.tracker.utils import visualization as vis
+from falconmot.tracker.utils.coco_gt_reader import CocoGTEvaluator
+from falconmot.utils.log import logger
+from falconmot.tracker.utils.timer import Timer
+from falconmot.data.dataset import LoadCocoSequencesForTracking
+from falconmot.cfg import opts
 
 _CLS_ID_OFFSET = 1_000_000
 
 _RESULT_FMT = '{frame},{id},{x1:.2f},{y1:.2f},{w:.2f},{h:.2f},{score:.4f},{cls_id},-1,-1\n'
 
 
-class SequenceRunner4cls:
-    """Runner with a built-in 7->4 class remap.
+class ECDetSequenceRunner5cls:
+    """Runner with a built-in 7->5 class remap.
 
-      1. Tracker is initialised with num_classes=NUM_CLS_EVAL_4 (track-id offset over 4 classes).
-      2. After decoding (7 classes), remap_dets_7cls_to_4cls() drops truck/tricycle/bus and
+    Differences from the base sequence runner:
+      1. Tracker is initialised with NUM_CLS_TRAIN=7 (unchanged; the tracker is unaware of the remap).
+      2. After decoding, remap_dets_7cls_to_5cls() drops bicycle/motor and
          shifts the class index before feeding the tracker.
-      3. When writing the result file, cls_id is a 4-class index (1-indexed).
-      4. Query Appearance-Motion (QAM) is unchanged -- the dense-map wiring is identical.
+      3. When writing the result file, cls_id is a 5-class index (1-indexed).
+      4. num_cls in MCTrack is set to NUM_CLS_EVAL so the track_id offset
+         is computed over 5 classes only.
     """
 
     def __init__(self, opt, frame_rate: int = 30):
@@ -116,10 +87,10 @@ class SequenceRunner4cls:
             conf_thres=opt.conf_thres,
             use_focal_loss=True,
         )
-
-        # Tracker runs in the 4-class space (after remap).
+        # Tracker runs in the 5-class space (after remap); num_classes=5 ensures
+        # track_id offset = cls_5idx * 1_000_000, matching the GT side.
         opt_tracker        = type('Opt', (), dict(vars(opt)))()   # shallow copy
-        opt_tracker.num_classes = NUM_CLS_EVAL_4
+        opt_tracker.num_classes = NUM_CLS_EVAL
         self.tracker = MCJDETracker(opt_tracker, frame_rate)
 
         self.timer       = Timer()
@@ -144,7 +115,8 @@ class SequenceRunner4cls:
             cls_id = int(labels_np[i])
             tlwh   = np.array([boxes_np[i, 0], boxes_np[i, 1], ws[i], hs[i]], dtype=np.float32)
             emb    = reid_np[i] if reid_np is not None else np.zeros(1, dtype=np.float32)
-            dets[cls_id].append(MCTrack(tlwh, float(scores_np[i]), emb, NUM_CLS_EVAL_4, cls_id))
+            # num_classes=NUM_CLS_EVAL: track_id counter keyed per 5cls slot
+            dets[cls_id].append(MCTrack(tlwh, float(scores_np[i]), emb, NUM_CLS_EVAL, cls_id))
         return dets
 
     def _collect_tracks(self, online_targets_dict: dict):
@@ -160,7 +132,10 @@ class SequenceRunner4cls:
 
     def run(self, seq_loader, result_path: str,
             save_dir=None, show_image: bool = False):
-        """Run one sequence and write the MOT result file in the 4-class scheme."""
+        """Run one sequence and write the MOT result file in the 5-class scheme.
+
+        seq_loader: _CocoSeqIterator — yield (frame_id:int, img, img0)
+        """
         if save_dir:
             mkdir_if_missing(save_dir)
 
@@ -182,46 +157,49 @@ class SequenceRunner4cls:
                     output = self.model(blob)
                     res    = self.postprocessor(output, self._orig_sizes)[0]
                     dets_7cls = self._decode_detections(res)
-                    # ── KEY: remap 7cls -> 4cls, drop truck/tricycle/bus ──
-                    dets_4cls = remap_dets_7cls_to_4cls(dets_7cls)
+                    # ── KEY: remap 7cls -> 5cls, drop bicycle(1) + motor(6) ──
+                    dets_5cls = remap_dets_7cls_to_5cls(dets_7cls)
                 self.timer.toc()
 
                 self.tracker.set_image(img0)
 
                 # Query Appearance-Motion: hand the dense map + the SAME image
-                # transform the postprocessor uses to decode boxes.
+                # transform the postprocessor uses to decode boxes, so predicted
+                # centres and detection centres live in one coordinate frame.
                 if 'reid_dense' in output:
                     if self.postprocessor._net_hw is not None:
+                        # letterbox decode in use → isotropic ratio + centred pad
                         net_h, net_w = self.postprocessor._net_hw
                         r = min(net_h / orig_h, net_w / orig_w)
                         rx = ry = r
                         pad_w = (net_w - orig_w * r) * 0.5
                         pad_h = (net_h - orig_h * r) * 0.5
                     else:
+                        # plain-resize decode (this repo) → per-axis ratio, no pad
                         net_w, net_h = self._net_wh
                         rx, ry = net_w / orig_w, net_h / orig_h
                         pad_w = pad_h = 0.0
                     self.tracker.set_dense(
-                        output['reid_dense'][0],            # [C,H,W]
+                        output['reid_dense'],            # [C,H,W]
                         stride=output['reid_dense_stride'],
                         ratio_x=rx, ratio_y=ry, pad_w=pad_w, pad_h=pad_h)
 
-                online_targets = self.tracker.update(dets_4cls, h_orig=orig_h, w_orig=orig_w)
+                online_targets = self.tracker.update(dets_5cls, h_orig=orig_h, w_orig=orig_w)
 
                 tlwhs, tids, tscores = self._collect_tracks(online_targets)
 
                 # Write result: cls_id 0-indexed -> 1-indexed to match the MOT format
-                for cls4_0idx in range(NUM_CLS_EVAL_4):
+                for cls5_0idx in range(NUM_CLS_EVAL):
                     for tlwh, tid, sc in zip(
-                            tlwhs[cls4_0idx], tids[cls4_0idx], tscores[cls4_0idx]):
+                            tlwhs[cls5_0idx], tids[cls5_0idx], tscores[cls5_0idx]):
                         if tid < 0:
                             continue
                         f_out.write(_RESULT_FMT.format(
                             frame=frame_id,
-                            id=tid + cls4_0idx * _CLS_ID_OFFSET,
+                            id=tid + cls5_0idx * _CLS_ID_OFFSET,
                             x1=tlwh[0], y1=tlwh[1], w=tlwh[2], h=tlwh[3],
                             score=sc,
-                            cls_id=cls4_0idx + 1,   # 1-indexed
+                            cls_id=cls5_0idx + 1,   # 1-indexed
                         ))
 
                 if show_image or save_dir:
@@ -229,7 +207,7 @@ class SequenceRunner4cls:
                         image=img0,
                         tlwhs_dict=tlwhs,
                         obj_ids_dict=tids,
-                        num_classes=NUM_CLS_EVAL_4,
+                        num_classes=NUM_CLS_EVAL,
                         scores=tscores,
                         frame_id=frame_id,
                         fps=1.0 / max(1e-5, self.timer.average_time),
@@ -254,9 +232,10 @@ def main(opt, ann_file: str, img_root: str, exp_name: str,
     result_root = osp.join(osp.dirname(img_root), 'results', exp_name)
     mkdir_if_missing(result_root)
 
+    # Load sequences from COCO JSON -- do not hardcode the sequence list
     src = LoadCocoSequencesForTracking(ann_file, img_root, img_size=opt.img_size)
 
-    runner = SequenceRunner4cls(opt)
+    runner = ECDetSequenceRunner5cls(opt)
     accs, names = [], []
     timer_avgs, timer_calls = [], []
 
@@ -272,19 +251,21 @@ def main(opt, ann_file: str, img_root: str, exp_name: str,
         timer_avgs.append(ta)
         timer_calls.append(tc)
 
+        # Evaluate against COCO JSON GT (5 classes); no raw .txt needed
         evaluator = CocoGTEvaluator(ann_file, seq_id)
         acc = evaluator.eval_file(result_filename)
         accs.append(acc)
         names.append(seq_id)
         logger.info('Done seq: %s', seq_id)
 
+    # Summary
     timer_avgs  = np.asarray(timer_avgs)
     timer_calls = np.asarray(timer_calls)
     all_time    = np.dot(timer_avgs, timer_calls)
     avg_fps     = 1.0 / max(all_time / max(np.sum(timer_calls), 1), 1e-5)
     logger.info('Total %.2fs  FPS %.2f', all_time, avg_fps)
 
-    print(f'\n[Eval] 4-class competition: {" / ".join(CLS4_NAMES.values())}')
+    print(f'\n[Eval] 5-class benchmark: {" / ".join(CLS5_NAMES.values())}')
     metrics = mm.metrics.motchallenge_metrics
     mh      = mm.metrics.create()
     summary = mh.compute_many(accs, metrics=metrics, names=names, generate_overall=True)
@@ -304,10 +285,14 @@ if __name__ == '__main__':
 
     opt.device = f'cuda:{opt.gpus[0]}' if opt.gpus[0] >= 0 else 'cpu'
 
+    # -- Required args (added to opts or passed directly) ----------------
+    # --img_root  : image folder (images/) of the COCO 5-class test-dev set
+    # --ann_file  : file instances_test-dev.json
+    # If opts lacks these two fields, add them via argparse or hardcode them:
     img_root = getattr(opt, 'track_img_root',
-                       '/data/VisDrone2019-COCO-4cls/test-dev/images')
+                       '/data/VisDrone2019-COCO-5cls/test-dev/images')
     ann_file = getattr(opt, 'track_ann_file',
-                       '/data/VisDrone2019-COCO-4cls/test-dev/annotations/instances_test-dev.json')
+                       '/data/VisDrone2019-COCO-5cls/test-dev/annotations/instances_test-dev.json')
 
     assert osp.isdir(img_root),  f'img_root not found: {img_root}'
     assert osp.isfile(ann_file), f'ann_file not found: {ann_file}'
@@ -321,7 +306,7 @@ if __name__ == '__main__':
         opt,
         ann_file=ann_file,
         img_root=img_root,
-        exp_name='falcon_visdrone_4cls',
+        exp_name='ecdet_visdrone_5cls',
         show_image=False,
         save_images=True,
     )

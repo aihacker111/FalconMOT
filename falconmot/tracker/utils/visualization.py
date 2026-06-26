@@ -9,6 +9,12 @@ import cv2
 import numpy as np
 
 
+def mkdir_if_missing(d):
+    """Create directory `d` (and parents) if it does not already exist."""
+    if d:
+        os.makedirs(d, exist_ok=True)
+
+        
 def get_color(idx):
     idx = idx * 3
     return ((37 * idx) % 255, (17 * idx) % 255, (29 * idx) % 255)

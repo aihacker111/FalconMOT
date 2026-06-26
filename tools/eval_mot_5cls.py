@@ -1,7 +1,7 @@
 """eval_mot_5cls.py -- Tracking + MOTMetrics evaluation on the 5-class benchmark split.
 
 Model train 7 classes (visdrone2coco_7cls_mot.py):
-    0:ped  1:bicycle  2:car  3:truck  4:tricycle  5:bus  6:motor
+    0:ped  1:bicycle  2:car  3:van  4:truck  5:bus  6:motor
 
 GT test-dev 5 classes (visdrone2coco_5cls_benchmark_mot.py):
     0:ped  1:car  2:truck  3:tricycle  4:bus
@@ -34,23 +34,23 @@ import torch
 
 import _paths  # noqa: F401
 
-from falconmot.models.model import create_model, load_model
-from falconmot.models.falcon_jde.postprocessor import FalconJDEPostProcessor
+from falconmot import create_model, load_model
+from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
 from falconmot.tracker.multitracker import MCJDETracker, MCTrack
 from falconmot.tracker.class_remap import (
     remap_dets_7cls_to_5cls,
     CLS5_NAMES,
     NUM_CLS_TRAIN,
-    NUM_CLS_EVAL,
+    NUM_CLS_EVAL_BENCHMARK,
     SKIP_SET_AFTER_REMAP,
 )
-from falconmot.tracking_utils import visualization as vis
-from falconmot.tracking_utils.coco_gt_reader import CocoGTEvaluator
-from falconmot.tracking_utils.log import logger
-from falconmot.tracking_utils.timer import Timer
-from falconmot.tracking_utils.utils import mkdir_if_missing
-from falconmot.datasets.dataset.coco_detection import LoadCocoSequencesForTracking
-from falconmot.opts import opts
+from falconmot.tracker.utils import mkdir_if_missing
+from falconmot.tracker.utils import visualization as vis
+from falconmot.tracker.utils.coco_gt_reader import CocoGTEvaluator
+from falconmot.utils.log import logger
+from falconmot.tracker.utils.timer import Timer
+from falconmot.data.dataset import LoadCocoSequencesForTracking
+from falconmot.cfg import opts
 
 _CLS_ID_OFFSET = 1_000_000
 
