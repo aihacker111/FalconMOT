@@ -279,7 +279,12 @@ def main(opt, ann_file: str, img_root: str, exp_name: str,
     out_xlsx = osp.join(result_root, f'summary_{exp_name}.xlsx')
     summary.to_excel(pd.ExcelWriter(out_xlsx))
     logger.info('Summary saved -> %s', out_xlsx)
-
+    try:
+        from falconmot.tracker.utils.hota import evaluate_hota_from_results
+        evaluate_hota_from_results(ann_file, result_root, src.seqs, CLS5_NAMES)
+    except ImportError:
+        logger.warning('TrackEval chưa cài -> bỏ qua HOTA. '
+                       'pip install git+https://github.com/JonathonLuiten/TrackEval.git')
 
 if __name__ == '__main__':
     opt = opts().init()
