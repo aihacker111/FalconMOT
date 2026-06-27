@@ -68,17 +68,35 @@ class MCTrack(MCBaseTrack):
             if tn > 0:
                 self.template = self.template / tn
 
-    def update_features(self, feat, alpha=None):
-        """L2-normalise the embedding and update the EMA `smooth_feat`."""
-        feat /= np.linalg.norm(feat)
-        self.alpha = (1.0 - alpha) if alpha is not None else 0.9
+    # def update_features(self, feat, alpha=None):
+    #     """L2-normalise the embedding and update the EMA `smooth_feat`."""
+    #     feat /= np.linalg.norm(feat)
+    #     self.alpha = (1.0 - alpha) if alpha is not None else 0.9
 
-        self.curr_feat = feat
+    #     self.curr_feat = feat
+    #     if self.smooth_feat is None:
+    #         self.smooth_feat = feat
+    #     else:
+    #         self.smooth_feat = self.alpha * self.smooth_feat + (1.0 - self.alpha) * feat
+    #     self.features.append(feat)
+    #     self.smooth_feat /= np.linalg.norm(self.smooth_feat)
+    def update_features(self, feat, score=None):
+        # Chuẩn hóa đặc trưng mới trước khi fusion
+        feat /= np.linalg.norm(feat)
+
         if self.smooth_feat is None:
             self.smooth_feat = feat
         else:
-            self.smooth_feat = self.alpha * self.smooth_feat + (1.0 - self.alpha) * feat
-        self.features.append(feat)
+            if score is not None:
+                # Điểm số thấp -> alpha cao -> tin tưởng nhiều hơn vào lịch sử đặc trưng cũ (smooth_feat)
+                # Nếu score = 1.0 -> alpha = 0.90
+                # Nếu score = 0.3 -> alpha = 0.97
+                alpha = 1.0 - 0.1 * score
+            else:
+                alpha = 0.90
+
+            self.smooth_feat = alpha * self.smooth_feat + (1.0 - alpha) * feat
+
         self.smooth_feat /= np.linalg.norm(self.smooth_feat)
 
     @staticmethod
@@ -97,22 +115,43 @@ class MCTrack(MCBaseTrack):
             tracks[i].mean = mean
             tracks[i].covariance = cov
 
+    # @staticmethod
+    # def multi_gmc(stracks, H=np.eye(2, 3)):
+    #     """Apply a global-motion-compensation affine `H` to track states."""
+    #     if len(stracks) == 0:
+    #         return
+    #     R = H[:2, :2]
+    #     # Use a single (larger) uniform scale factor for numerical stability.
+    #     larger_scale = max(R[0, 0], R[1, 1])
+    #     R = np.array([[larger_scale, 0], [0, larger_scale]])
+    #     R8x8 = np.kron(np.eye(4, dtype=float), R)
+    #     t = H[:2, 2]
+    #     for i, st in enumerate(stracks):
+    #         mean = R8x8.dot(st.mean)
+    #         mean[:2] += t
+    #         st.mean = mean
+    #         st.covariance = R8x8.dot(st.covariance).dot(R8x8.transpose())
     @staticmethod
-    def multi_gmc(stracks, H=np.eye(2, 3)):
-        """Apply a global-motion-compensation affine `H` to track states."""
-        if len(stracks) == 0:
+    def multi_gmc(tracks, H):
+        if H is None or np.array_equal(H, np.eye(2, 3)):
             return
+
         R = H[:2, :2]
-        # Use a single (larger) uniform scale factor for numerical stability.
-        larger_scale = max(R[0, 0], R[1, 1])
-        R = np.array([[larger_scale, 0], [0, larger_scale]])
-        R8x8 = np.kron(np.eye(4, dtype=float), R)
         t = H[:2, 2]
-        for i, st in enumerate(stracks):
-            mean = R8x8.dot(st.mean)
-            mean[:2] += t
-            st.mean = mean
-            st.covariance = R8x8.dot(st.covariance).dot(R8x8.transpose())
+
+        # Tạo ma trận biến đổi trạng thái 8x8 cho Kalman Filter (x, y, a, h, vx, vy, va, vh)
+        R_8x8 = np.eye(8, dtype=np.float32)
+        R_8x8[:2, :2] = R      # Xoay vị trí trung tâm x, y
+        R_8x8[4:6, 4:6] = R    # Xoay vận tốc vx, vy
+
+        for track in tracks:
+            if track.mean is not None:
+                # 1. Warp vị trí trung tâm (x, y)
+                track.mean[:2] = np.dot(R, track.mean[:2]) + t
+                # 2. Warp vận tốc trung tâm (vx, vy)
+                track.mean[4:6] = np.dot(R, track.mean[4:6])
+                # 3. Warp toàn bộ ma trận hiệp phương sai hệ thống
+                track.covariance = np.dot(R_8x8, np.dot(track.covariance, R_8x8.T))
 
     def activate(self, kalman_filter, frame_id):
         """Start a new track."""
@@ -134,8 +173,11 @@ class MCTrack(MCBaseTrack):
 
     def re_activate(self, new_track, frame_id, new_id=False):
         """Reactivate a lost track from a new matched detection."""
-        self.mean, self.covariance = self.kalman_filter.update(
-            self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh))
+        # self.mean, self.covariance = self.kalman_filter.update(
+        #     self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh))
+        self.mean, self.covariance = self.kalman_filter.update_nsa(
+            self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh), new_track.score
+        )
         self.update_features(new_track.curr_feat)
         self.update_template(new_track.template)
 

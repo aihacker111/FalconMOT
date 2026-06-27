@@ -146,8 +146,23 @@ class GMC:
 
         if self.downscale > 1.0:
             frame = cv2.resize(frame, (width // self.downscale, height // self.downscale))
+        # Tạo mặt nạ loại bỏ Foreground cản trở việc tính toán Background Motion
+        mask = np.ones_like(frame, dtype=np.uint8) * 255
+        if detections is not None and len(detections) > 0:
+            for det in detections:
+                # Giả định det ở định dạng [x1, y1, x2, y2] hoặc [tlwh]
+                # Điều chỉnh tọa độ theo tỷ lệ downscale
+                x1 = int(det[0] / self.downscale)
+                y1 = int(det[1] / self.downscale)
+                x2 = int((det[0] + det[2]) / self.downscale) if len(det) == 4 else int(det[2] / self.downscale)
+                y2 = int((det[1] + det[3]) / self.downscale) if len(det) == 4 else int(det[3] / self.downscale)
 
-        keypoints = cv2.goodFeaturesToTrack(frame, mask=None, **self.feature_params)
+                # Giới hạn kích thước bbox trong khung hình
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                mask[y1:y2, x1:x2] = 0
+        # keypoints = cv2.goodFeaturesToTrack(frame, mask=None, **self.feature_params)
+        keypoints = cv2.goodFeaturesToTrack(frame, mask=mask, **self.feature_params)
 
         if not self.initializedFirstFrame:
             self.prevFrame = frame.copy()
