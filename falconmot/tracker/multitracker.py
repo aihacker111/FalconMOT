@@ -446,10 +446,11 @@ class MCJDETracker(object):
                 d_mot, w_mot = None, None
                 if self._dense_hat is not None and len(pool) > 0 and len(cls_detects) > 0:
                     d_mot, w_mot = self._appearance_motion(pool, cls_detects)
+                pool_sizes = np.array([np.sqrt(max(t.tlwh[2] * t.tlwh[3], 1.0)) for t in pool], dtype=np.float32)
                 cost = matching.fuse_loglik(
                     emb_d, iou_d, d_mot, w_mot,
                     w_app=self.w_app, w_iou=self.w_iou,
-                    proximity_gate=self.proximity_gate, motion_gate=self.motion_gate)
+                    proximity_gate=self.proximity_gate, motion_gate=self.motion_gate, track_sizes=pool_sizes)
                 thr  = self.match_thresh
             matches, u_track, u_detection = matching.linear_assignment(cost, thresh=thr)
 
