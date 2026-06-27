@@ -86,6 +86,9 @@ class ECDetSequenceRunner5cls:
             num_top_queries=getattr(opt, 'K', 300),
             conf_thres=opt.conf_thres,
             use_focal_loss=True,
+            nms_iou=getattr(opt, 'nms_iou', 0.6),
+            nms_emb_hi=getattr(opt, 'nms_emb_hi', 0.85),
+            nms_emb_relax=getattr(opt, 'nms_emb_relax', 0.45),
         )
         # Tracker runs in the 5-class space (after remap); num_classes=5 ensures
         # track_id offset = cls_5idx * 1_000_000, matching the GT side.

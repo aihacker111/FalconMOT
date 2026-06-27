@@ -95,6 +95,9 @@ class FalconVideoTracker:
             num_top_queries=getattr(opt, "K", 300),
             conf_thres=opt.conf_thres,
             use_focal_loss=True,
+            nms_iou=getattr(opt, 'nms_iou', 0.6),
+            nms_emb_hi=getattr(opt, 'nms_emb_hi', 0.85),
+            nms_emb_relax=getattr(opt, 'nms_emb_relax', 0.45),
         )
         # Letterbox -> the postprocessor needs net_hw to decode boxes correctly.
         # Plain resize -> do NOT set_net_hw (it uses the scale * orig branch).

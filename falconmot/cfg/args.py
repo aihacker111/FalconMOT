@@ -296,6 +296,48 @@ class opts(object):
         self.parser.add_argument('--motion_gate', type=float, default=0.9,
                                  help='motion-distance spatial gate: motion can vouch for a '
                                       'low-IoU pair only if its motion_dist is below this.')
+        # ── Refactored tracker (MotionModel / Associator / TrackerCfg) ───
+        # Mapped onto TrackerCfg via TrackerCfg.from_opt(opt). Leaving any of
+        # these unset falls back to the dataclass defaults.
+        self.parser.add_argument('--max_lost', type=int, default=60,
+                                 help='frames a lost track survives before removal (was 30).')
+        self.parser.add_argument('--use_nsa', action='store_true', default=True,
+                                 help='confidence-scaled (NSA) Kalman update.')
+        self.parser.add_argument('--no_nsa', dest='use_nsa', action='store_false')
+        self.parser.add_argument('--use_oru', action='store_true', default=True,
+                                 help='observation-centric re-update (ORU) on lost-track revival.')
+        self.parser.add_argument('--no_oru', dest='use_oru', action='store_false')
+        self.parser.add_argument('--use_ocm', action='store_true', default=False,
+                                 help='velocity-direction consistency cost in stage-1 (ablation).')
+        self.parser.add_argument('--use_gmc', action='store_true', default=True,
+                                 help='global motion compensation.')
+        self.parser.add_argument('--no_gmc', dest='use_gmc', action='store_false')
+        # appearance-only revival of lost tracks (relative, scale-free gate)
+        self.parser.add_argument('--reid_ratio', type=float, default=0.80,
+                                 help='Lowe ratio for revival: best_dist <= ratio*second_best. '
+                                      'Lower = stricter (fewer IDs, fewer revivals).')
+        self.parser.add_argument('--reid_gate_max', type=float, default=0.50,
+                                 help='loose absolute cosine backstop for revival (safety net).')
+        self.parser.add_argument('--reid_mutual', action='store_true', default=True,
+                                 help='require mutual nearest-neighbour for revival.')
+        self.parser.add_argument('--no_reid_mutual', dest='reid_mutual', action='store_false')
+        self.parser.add_argument('--reid_area_gate', type=float, default=4.0,
+                                 help='reject revival pairs whose box-area ratio exceeds this.')
+        # adaptive appearance EMA ("dynamic appearance")
+        self.parser.add_argument('--app_gain_max', type=float, default=0.10,
+                                 help='max embedding EMA absorption at quality==1 (~ old 1-momentum).')
+        self.parser.add_argument('--app_occ_power', type=float, default=1.0,
+                                 help='exponent on (1-occlusion) in the EMA quality term; '
+                                      '>1 punishes partial occlusion more sharply.')
+        # embedding-aware NMS (postprocessor) — adaptive appearance gate
+        self.parser.add_argument('--nms_iou', type=float, default=0.6,
+                                 help='same-class IoU above which a pair may be a duplicate.')
+        self.parser.add_argument('--nms_emb_hi', type=float, default=0.85,
+                                 help='appearance similarity required at IoU==nms_iou (strictest).')
+        self.parser.add_argument('--nms_emb_relax', type=float, default=0.45,
+                                 help='how far the appearance bar loosens as IoU->1. '
+                                      '0.0 reproduces the old fixed two-threshold rule.')
+
         # -- Tracking-metric validation (select model_best by IDF1/MOTA) --
         self.parser.add_argument('--emb_weight', type=float, default=1.0,
                                  help='ReID weight in association fusion. '
