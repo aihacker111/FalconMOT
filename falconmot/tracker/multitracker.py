@@ -81,22 +81,23 @@ class MCTrack(MCBaseTrack):
     #     self.features.append(feat)
     #     self.smooth_feat /= np.linalg.norm(self.smooth_feat)
     def update_features(self, feat, score=None):
-        # Chuẩn hóa đặc trưng mới trước khi fusion
+        """L2-normalise the embedding and update the EMA `smooth_feat`."""
         feat /= np.linalg.norm(feat)
-
+        
+        # [QUAN TRỌNG] Phục hồi biến curr_feat để dùng cho file matching.py
+        self.curr_feat = feat 
+        
         if self.smooth_feat is None:
             self.smooth_feat = feat
         else:
             if score is not None:
                 # Điểm số thấp -> alpha cao -> tin tưởng nhiều hơn vào lịch sử đặc trưng cũ (smooth_feat)
-                # Nếu score = 1.0 -> alpha = 0.90
-                # Nếu score = 0.3 -> alpha = 0.97
                 alpha = 1.0 - 0.1 * score
             else:
                 alpha = 0.90
-
+                
             self.smooth_feat = alpha * self.smooth_feat + (1.0 - alpha) * feat
-
+            
         self.smooth_feat /= np.linalg.norm(self.smooth_feat)
 
     @staticmethod
