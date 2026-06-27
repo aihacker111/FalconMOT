@@ -109,72 +109,37 @@ def motion_distance(pred_xy, det_xy, track_sizes, kappa=0.1):
     return (1.0 - np.exp(-d2 / (2.0 * sigma ** 2))).astype(np.float32)
 
 
-# def fuse_loglik(d_app, d_iou, d_mot=None, w_mot=None,
-#                 w_app=1.0, w_iou=1.0,
-#                 proximity_gate=0.95, motion_gate=0.9):
-#     """Probabilistic multi-cue fusion: a per-track weighted average of cue
-#     *distances* (= −log of a product of independent exponential likelihoods),
-#     instead of a product of similarities.
-
-#         cost_ij = ( w_a d^a_ij + w_g d^g_ij + w^m_i d^m_ij )
-#                   / ( w_a + w_g + w^m_i )
-
-#     A spatial gate blocks pairs that are implausible by BOTH geometry and
-#     motion (so appearance alone cannot match across the whole frame), while a
-#     strong IoU *or* a strong motion prediction is enough to vouch for a pair:
-
-#         keep_ij = (d^g_ij ≤ proximity_gate) OR (d^m_ij ≤ motion_gate)
-
-#     Args:
-#         d_app : (T, D) appearance (cosine) distance.
-#         d_iou : (T, D) 1 - IoU.
-#         d_mot : (T, D) motion distance, or None (appearance+IoU only).
-#         w_mot : (T,) per-track motion confidence (entropy-gated), or None.
-#         w_app, w_iou : scalar cue weights.
-#         proximity_gate, motion_gate : spatial gating thresholds.
-#     Returns:
-#         (T, D) fused cost in [0, 1] (gated entries set to a large value).
-#     """
-#     if d_app.size == 0:
-#         return d_app
-#     T, D = d_app.shape
-#     cost = w_app * d_app + w_iou * d_iou
-#     wtot = np.full((T, 1), float(w_app + w_iou), dtype=np.float32)
-
-#     use_motion = d_mot is not None and w_mot is not None and d_mot.size > 0
-#     if use_motion:
-#         wm = np.asarray(w_mot, dtype=np.float32)[:, None]    # (T, 1)
-#         cost = cost + wm * d_mot
-#         wtot = wtot + wm
-
-#     cost = cost / np.maximum(wtot, 1e-6)
-
-#     # spatial gate: IoU or motion must vouch for the pair
-#     spatial_ok = d_iou <= proximity_gate
-#     if use_motion:
-#         spatial_ok = spatial_ok | (d_mot <= motion_gate)
-#     cost = np.where(spatial_ok, cost, 1e4).astype(np.float32)
-#     return cost
-
-
 def fuse_loglik(d_app, d_iou, d_mot=None, w_mot=None,
                 w_app=1.0, w_iou=1.0,
-                proximity_gate=0.95, motion_gate=0.9, track_sizes=None):
+                proximity_gate=0.95, motion_gate=0.9):
+    """Probabilistic multi-cue fusion: a per-track weighted average of cue
+    *distances* (= −log of a product of independent exponential likelihoods),
+    instead of a product of similarities.
+
+        cost_ij = ( w_a d^a_ij + w_g d^g_ij + w^m_i d^m_ij )
+                  / ( w_a + w_g + w^m_i )
+
+    A spatial gate blocks pairs that are implausible by BOTH geometry and
+    motion (so appearance alone cannot match across the whole frame), while a
+    strong IoU *or* a strong motion prediction is enough to vouch for a pair:
+
+        keep_ij = (d^g_ij ≤ proximity_gate) OR (d^m_ij ≤ motion_gate)
+
+    Args:
+        d_app : (T, D) appearance (cosine) distance.
+        d_iou : (T, D) 1 - IoU.
+        d_mot : (T, D) motion distance, or None (appearance+IoU only).
+        w_mot : (T,) per-track motion confidence (entropy-gated), or None.
+        w_app, w_iou : scalar cue weights.
+        proximity_gate, motion_gate : spatial gating thresholds.
+    Returns:
+        (T, D) fused cost in [0, 1] (gated entries set to a large value).
+    """
     if d_app.size == 0:
         return d_app
     T, D = d_app.shape
-    
-    # [MỚI] Tự động giảm trọng số ReID cho vật thể nhỏ
-    if track_sizes is not None:
-        # Chuẩn hóa kích thước: Nếu < 64 pixels, trọng số giảm dần (tối thiểu 0.2)
-        # Nếu > 64 pixels, giữ nguyên trọng số gốc
-        size_factor = np.clip(np.asarray(track_sizes) / 64.0, 0.2, 1.0)
-        dynamic_w_app = (w_app * size_factor)[:, None]  # Shape: (T, 1)
-    else:
-        dynamic_w_app = np.full((T, 1), float(w_app), dtype=np.float32)
-
-    cost = dynamic_w_app * d_app + w_iou * d_iou
-    wtot = dynamic_w_app + w_iou  # Shape: (T, 1)
+    cost = w_app * d_app + w_iou * d_iou
+    wtot = np.full((T, 1), float(w_app + w_iou), dtype=np.float32)
 
     use_motion = d_mot is not None and w_mot is not None and d_mot.size > 0
     if use_motion:
@@ -184,7 +149,7 @@ def fuse_loglik(d_app, d_iou, d_mot=None, w_mot=None,
 
     cost = cost / np.maximum(wtot, 1e-6)
 
-    # spatial gate logic giữ nguyên...
+    # spatial gate: IoU or motion must vouch for the pair
     spatial_ok = d_iou <= proximity_gate
     if use_motion:
         spatial_ok = spatial_ok | (d_mot <= motion_gate)
