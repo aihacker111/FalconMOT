@@ -27,6 +27,20 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
+# --- NUMPY PATCH FOR TRACKEVAL (NumPy >= 1.24 compatibility) ---
+# TrackEval relies on deprecated types (np.float, np.int, np.bool) that were 
+# removed in NumPy 1.24. This runtime patch maps them to valid types so 
+# TrackEval runs seamlessly without requiring any source code modifications.
+if not hasattr(np, 'float'):
+    np.float = np.float64
+if not hasattr(np, 'int'):
+    np.int = np.int64
+if not hasattr(np, 'bool'):
+    np.bool = np.bool_
+if not hasattr(np, 'object'):
+    np.object = object
+# ---------------------------------------------------------------
+
 from falconmot.tracker.utils.coco_gt_reader import load_coco_gt_for_seq
 
 CLS_ID_OFFSET = 1_000_000
