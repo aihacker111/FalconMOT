@@ -177,7 +177,7 @@ class MCTrack(MCBaseTrack):
         # self.mean, self.covariance = self.kalman_filter.update(
         #     self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh))
         self.mean, self.covariance = self.kalman_filter.update_nsa(
-            self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh), new_track.score
+            self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh), new_track.score
         )
         self.update_features(new_track.curr_feat)
         self.update_template(new_track.template)
