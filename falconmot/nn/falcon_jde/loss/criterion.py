@@ -22,6 +22,7 @@ from ..ops.box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
 from falconmot.nn.falcon_jde.loss.matcher import HungarianMatcher
 from ..ops.utils import bbox2distance
 from ..ops.feat_fusion import build_center_heatmaps, gaussian_focal_loss
+from .siwbd import si_wbd_loss
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +115,13 @@ class FalconJDECriterion(nn.Module):
         s_id_init:           float = 1.85,
         w_dense_ce:          float = 0.5,
         w_cons:              float = 0.1,
+        # ----- Fovea-MOT additions -----
+        use_siwbd:           bool  = False,   # SI-WBD box loss (small-object friendly)
+        siwbd_C:             float = 0.5,     # area-normalisation spread
+        siwbd_replaces_giou: bool  = False,   # True: drop GIoU, use SI-WBD only
+        use_tucl:            bool  = False,    # uncertainty-weighted ReID (T-UCL)
+        tucl_lambda:         float = 0.05,    # weight of the -log(w) regulariser
+        use_entropy_aux:     bool  = False,   # supervise the SAFA entropy scorer
     ):
         super().__init__()
         self.matcher             = matcher
@@ -132,6 +140,12 @@ class FalconJDECriterion(nn.Module):
         self.use_arcface         = use_arcface
         self.w_dense_ce          = w_dense_ce
         self.w_cons              = w_cons
+        self.use_siwbd           = use_siwbd
+        self.siwbd_C             = siwbd_C
+        self.siwbd_replaces_giou = siwbd_replaces_giou
+        self.use_tucl            = use_tucl
+        self.tucl_lambda         = tucl_lambda
+        self.use_entropy_aux     = use_entropy_aux
 
         self.weight_dict = weight_dict or {
             'loss_mal':  1.0,
@@ -140,6 +154,10 @@ class FalconJDECriterion(nn.Module):
             'loss_fgl':  0.15,
             'loss_ddf':  1.5,
         }
+        # Sensible defaults so the new terms contribute even if a caller passes a
+        # weight_dict that predates these keys.
+        self.weight_dict.setdefault('loss_siwbd', 2.0)
+        self.weight_dict.setdefault('loss_entropy', 0.5)
 
         # Cache for FGL/DDF, reset every forward.
         self.fgl_targets, self.fgl_targets_dn = None, None
@@ -209,10 +227,19 @@ class FalconJDECriterion(nn.Module):
             box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(tgt_boxes)))
         if boxes_weight is not None:
             loss_giou = loss_giou * boxes_weight
-        return {
-            'loss_bbox': loss_bbox.sum() / num_boxes,
-            'loss_giou': loss_giou.sum() / num_boxes,
-        }
+        out = {'loss_bbox': loss_bbox.sum() / num_boxes}
+
+        if self.use_siwbd:
+            # SI-WBD: scale-invariant, smooth gradient for tiny boxes.
+            l_siwbd = si_wbd_loss(src_boxes, tgt_boxes, C=self.siwbd_C)
+            if boxes_weight is not None:
+                l_siwbd = l_siwbd * boxes_weight
+            out['loss_siwbd'] = l_siwbd.sum() / num_boxes
+            if not self.siwbd_replaces_giou:
+                out['loss_giou'] = loss_giou.sum() / num_boxes
+        else:
+            out['loss_giou'] = loss_giou.sum() / num_boxes
+        return out
 
     @staticmethod
     def unimodal_distribution_focal_loss(pred, label, weight_right, weight_left,
@@ -316,11 +343,19 @@ class FalconJDECriterion(nn.Module):
         dev = pred_reid.device
         reid_loss = pred_reid.sum() * 0.0
 
+        # T-UCL: per-query location/quality estimate w_i = sigmoid(LQE-refined score).
+        # High for sharp/large boxes, low for tiny/blurry ones. Detached: it gates
+        # the ReID gradient, it does not receive it.
+        quality_map = None
+        if self.use_tucl and 'pred_logits' in outputs:
+            quality_map = outputs['pred_logits'].sigmoid().amax(dim=-1).detach()  # (B,N)
+
         cls_emb       = {c: [] for c in self.nid_dict}
         cls_emb_raw   = {c: [] for c in self.nid_dict}
         cls_emb_dense = {c: [] for c in self.nid_dict}
         cls_emb_app   = {c: [] for c in self.nid_dict}          # NEW
         cls_ids       = {c: [] for c in self.nid_dict}
+        cls_w         = {c: [] for c in self.nid_dict}          # T-UCL weights
         pred_reid_app = outputs.get('pred_reid_app', None)
 
         for b_idx, (src_idx, tgt_idx) in enumerate(indices):
@@ -340,6 +375,7 @@ class FalconJDECriterion(nn.Module):
             app_b = pred_reid_app[b_idx][src_v] if pred_reid_app is not None else None
             lbl_b = labels[valid]
             ids_b = tids[valid]
+            w_b = quality_map[b_idx][src_v] if quality_map is not None else None
 
             dense_b = None
             if pred_reid_map is not None:
@@ -355,6 +391,8 @@ class FalconJDECriterion(nn.Module):
                 if app_b is not None:                                  # NEW
                     cls_emb_app[cls_id].append(app_b[mask])
                 cls_ids[cls_id].append(ids_b[mask])
+                if w_b is not None:
+                    cls_w[cls_id].append(w_b[mask])
                 if dense_b is not None:
                     cls_emb_dense[cls_id].append(dense_b[mask])
 
@@ -372,7 +410,16 @@ class FalconJDECriterion(nn.Module):
             else:
                 emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
                 logits = self.linear_classifiers[str(cls_id)](emb_id)
-            reid_loss = reid_loss + self.ce_loss(logits, ids)
+
+            if self.use_tucl and cls_w[cls_id]:
+                # T-UCL: down-weight unreliable (small/blurry) samples, with a
+                # -lambda*log(w) term (Kendall homoscedastic uncertainty) that
+                # forbids the trivial w->0 cheat.
+                w = torch.cat(cls_w[cls_id], dim=0).clamp(1e-4, 1.0)
+                ce_i = F.cross_entropy(logits, ids, ignore_index=-1, reduction='none')
+                reid_loss = reid_loss + (w * ce_i - self.tucl_lambda * torch.log(w)).mean()
+            else:
+                reid_loss = reid_loss + self.ce_loss(logits, ids)
 
             # sparse triplet (pre-neck)
             if self.use_triplet and emb_raw.shape[0] >= 2:
@@ -411,6 +458,23 @@ class FalconJDECriterion(nn.Module):
         losses['loss_s4_aux'] = gaussian_focal_loss(pred, gt)
         return losses
 
+    def loss_entropy(self, outputs, targets, indices, num_boxes):
+        """Supervise the SAFA entropy scorer (S8) with a Gaussian center heatmap.
+
+        Teaches the scorer *where* objects are, so the top-rho keep-mask routes
+        the expensive S4 compute to object regions — the premise of the GFLOPs
+        reduction.
+        """
+        dev = outputs['pred_logits'].device
+        losses = {'loss_entropy': torch.tensor(0.0, device=dev)}
+        if 'pred_entropy' not in outputs:
+            return losses
+        pred = outputs['pred_entropy']                # [B,1,H8,W8] logit
+        _, _, H, W = pred.shape
+        gt = build_center_heatmaps(targets, H, W, dev)
+        losses['loss_entropy'] = gaussian_focal_loss(pred, gt)
+        return losses
+
     # ==================================================================
     # Utilities
     # ==================================================================
@@ -444,10 +508,11 @@ class FalconJDECriterion(nn.Module):
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
-            'mal':    self.loss_labels_mal,
-            'boxes':  self.loss_boxes,
-            'local':  self.loss_local,
-            's4_aux': self.loss_s4_aux,
+            'mal':     self.loss_labels_mal,
+            'boxes':   self.loss_boxes,
+            'local':   self.loss_local,
+            's4_aux':  self.loss_s4_aux,
+            'entropy': self.loss_entropy,
         }
         assert loss in loss_map, f'Unknown loss: {loss}'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -518,8 +583,8 @@ class FalconJDECriterion(nn.Module):
 
         def _apply(out, tgts, idx_main, idx_go, nb, nb_go, suffix=''):
             for loss in self.losses:
-                # s4_aux is computed only once on the main branch.
-                if loss == 's4_aux' and suffix != '':
+                # s4_aux / entropy are computed only once on the main branch.
+                if loss in ('s4_aux', 'entropy') and suffix != '':
                     continue
                 # GO/union set applied to both boxes and local (per DEIM).
                 use_go = self.use_uni_set and loss in ('boxes', 'local')

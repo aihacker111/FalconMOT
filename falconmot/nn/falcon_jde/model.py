@@ -24,6 +24,7 @@ from .head.dfine_decoder import MSDeformableAttention
 from .ops.feat_fusion import (
     FeatFusion, S4AuxiliaryHeadV2, ConvNeXtV2Block, LayerNorm2d,
 )
+from .ops.safa import SparseFeatFusion
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +214,9 @@ class FalconJDEModel(nn.Module):
         reid_num_points: int = 8,
         reid_grad_scale: float = 1.0,
         reid_use_s4_dense=False,
-        reid_s4_in_ch=None
+        reid_s4_in_ch=None,
+        use_safa: bool = False,
+        safa_keep_ratio: float = 0.25,
     ):
         super().__init__()
         self.backbone   = backbone
@@ -223,6 +226,7 @@ class FalconJDEModel(nn.Module):
         self.use_s4     = use_s4
         self.use_s4_aux = use_s4_aux
         self.use_reid   = use_reid
+        self.use_safa   = use_safa
         self.reid_grad_scale = reid_grad_scale
 
         if use_reid:
@@ -234,7 +238,13 @@ class FalconJDEModel(nn.Module):
             )
 
         if use_s4:
-            self.s4_branch   = FeatFusion(sta_dim, decoder.hidden_dim, n_blocks=2)
+            if use_safa:
+                # SAFA: entropy-gated sparse S4 fusion (replaces dense FeatFusion).
+                self.s4_branch = SparseFeatFusion(
+                    sta_dim, decoder.hidden_dim, n_blocks=2,
+                    scorer_in_ch=decoder.hidden_dim, keep_ratio=safa_keep_ratio)
+            else:
+                self.s4_branch = FeatFusion(sta_dim, decoder.hidden_dim, n_blocks=2)
             self.s4_aux_head = S4AuxiliaryHeadV2(decoder.hidden_dim)
 
     def forward(self, x: torch.Tensor, targets=None):
@@ -243,17 +253,24 @@ class FalconJDEModel(nn.Module):
         c1 = getattr(self.backbone, '_s4_feat', None)
 
         if self.use_s4:
-            p2 = self.s4_branch(c1, feats[0])
+            if self.use_safa:
+                p2, ent_logit = self.s4_branch(c1, feats[0])
+            else:
+                p2 = self.s4_branch(c1, feats[0])
+                ent_logit = None
             dec_feats = [p2, feats[0], feats[1]]
             reid_feat = p2
         else:
             dec_feats = feats
             reid_feat = feats[0]
+            ent_logit = None
 
         out = self.decoder(dec_feats, targets)
 
         if self.use_s4 and self.use_s4_aux and self.training:
             out['pred_s4_aux'] = self.s4_aux_head(p2)
+        if self.use_safa and ent_logit is not None and self.training:
+            out['pred_entropy'] = ent_logit
 
         if 'eval_hs' in out and self.use_reid:
             hs = out.pop('eval_hs')
@@ -450,6 +467,7 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         aux_loss          = True,
         reg_max           = getattr(opt, 'reg_max', 32),
         reg_scale         = 4.0,
+        scale_adaptive    = getattr(opt, 'use_safa', False) and getattr(opt, 'safa_scale_adaptive', True),
     )
 
     model = FalconJDEModel(
@@ -462,7 +480,9 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         reid_num_points=getattr(opt, 'reid_num_points', 8),
         reid_grad_scale=getattr(opt, 'reid_grad_scale', 1.0),
         reid_use_s4_dense=getattr(opt, 'reid_use_s4_dense', False),
-        reid_s4_in_ch=getattr(opt, 'conv_inplane', 32)
+        reid_s4_in_ch=getattr(opt, 'conv_inplane', 32),
+        use_safa=getattr(opt, 'use_safa', False),
+        safa_keep_ratio=getattr(opt, 'safa_keep_ratio', 0.25),
     )
 
     ckpt_path = getattr(opt, 'deim_pretrained', '')

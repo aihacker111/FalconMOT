@@ -42,6 +42,17 @@ def _build_criterion(opt) -> FalconJDECriterion:
         weight_dict['loss_s4_aux'] = 0.2
         losses.append('s4_aux')
 
+    # ----- Fovea-MOT: SI-WBD box loss -----
+    use_siwbd = getattr(opt, 'use_siwbd', False)
+    if use_siwbd:
+        weight_dict['loss_siwbd'] = getattr(opt, 'siwbd_weight', 2.0)
+
+    # ----- Fovea-MOT: SAFA entropy supervision -----
+    use_entropy_aux = getattr(opt, 'use_safa', False) and getattr(opt, 'use_entropy_aux', True)
+    if use_entropy_aux:
+        weight_dict['loss_entropy'] = getattr(opt, 'entropy_weight', 0.5)
+        losses.append('entropy')
+
     return FalconJDECriterion(
         matcher             = matcher,
         num_classes         = opt.num_classes,
@@ -61,6 +72,13 @@ def _build_criterion(opt) -> FalconJDECriterion:
         use_arcface         = getattr(opt, 'use_arcface', False),
         s_det_init          = getattr(opt, 's_det_init', 2.5),
         s_id_init           = getattr(opt, 's_id_init', 1.85),
+        # ----- Fovea-MOT -----
+        use_siwbd           = use_siwbd,
+        siwbd_C             = getattr(opt, 'siwbd_C', 0.5),
+        siwbd_replaces_giou = getattr(opt, 'siwbd_replaces_giou', False),
+        use_tucl            = getattr(opt, 'use_tucl', False),
+        tucl_lambda         = getattr(opt, 'tucl_lambda', 0.05),
+        use_entropy_aux     = use_entropy_aux,
     )
 
 
@@ -112,6 +130,10 @@ class MotTrainer(BaseTrainer):
 
         if getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', False):
             loss_states.append('loss_s4_aux')
+        if getattr(opt, 'use_siwbd', False):
+            loss_states.append('loss_siwbd')
+        if getattr(opt, 'use_safa', False) and getattr(opt, 'use_entropy_aux', True):
+            loss_states.append('loss_entropy')
         criterion = _build_criterion(opt)
         return loss_states, criterion
 

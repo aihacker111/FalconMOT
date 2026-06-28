@@ -40,6 +40,7 @@ class TransformerDecoderLayer(nn.Module):
                  cross_attn_method='default',
                  layer_scale=None,
                  use_gateway=False,
+                 scale_adaptive=False,
                  ):
         super(TransformerDecoderLayer, self).__init__()
 
@@ -54,7 +55,9 @@ class TransformerDecoderLayer(nn.Module):
         self.norm1 = RMSNorm(d_model)
 
         # cross attention
-        self.cross_attn = MSDeformableAttention(d_model, n_head, n_levels, n_points, method=cross_attn_method)
+        self.cross_attn = MSDeformableAttention(d_model, n_head, n_levels, n_points,
+                                                method=cross_attn_method,
+                                                scale_adaptive=scale_adaptive)
         self.dropout2 = nn.Dropout(dropout)
 
         self.use_gateway = use_gateway
@@ -254,6 +257,7 @@ class DEIMTransformer(nn.Module):
                  use_gateway=True,
                  share_bbox_head=False,
                  share_score_head=False,
+                 scale_adaptive=False,
                  ):
         super().__init__()
         assert len(feat_channels) <= num_levels
@@ -291,9 +295,11 @@ class DEIMTransformer(nn.Module):
         self.up = nn.Parameter(torch.tensor([0.5]), requires_grad=False)
         self.reg_scale = nn.Parameter(torch.tensor([reg_scale]), requires_grad=False)
         decoder_layer = TransformerDecoderLayer(hidden_dim, nhead, dim_feedforward, dropout, \
-            activation, num_levels, num_points, cross_attn_method=cross_attn_method, use_gateway=use_gateway)
+            activation, num_levels, num_points, cross_attn_method=cross_attn_method, use_gateway=use_gateway,
+            scale_adaptive=scale_adaptive)
         decoder_layer_wide = TransformerDecoderLayer(hidden_dim, nhead, dim_feedforward, dropout, \
-            activation, num_levels, num_points, cross_attn_method=cross_attn_method, layer_scale=layer_scale, use_gateway=use_gateway)
+            activation, num_levels, num_points, cross_attn_method=cross_attn_method, layer_scale=layer_scale, use_gateway=use_gateway,
+            scale_adaptive=scale_adaptive)
         self.decoder = TransformerDecoder(hidden_dim, decoder_layer, decoder_layer_wide, num_layers, nhead,
                                           reg_max, self.reg_scale, self.up, eval_idx, layer_scale, act=activation)
       # denoising

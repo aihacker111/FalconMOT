@@ -88,6 +88,36 @@ class opts(object):
         self.parser.add_argument('--no_s4_aux', dest='use_s4_aux', action='store_false',
                                  help='disable S4 auxiliary loss/head; no aux gradient')
 
+        # ── Fovea-MOT: SAFA (Scale-Adaptive Foveal Attention) ───────────────
+        self.parser.add_argument('--use_safa', action='store_true', default=False,
+                                 help='Entropy-gated sparse S4 fusion + scale-adaptive '
+                                      'deformable routing (requires --use_s4).')
+        self.parser.add_argument('--safa_keep_ratio', type=float, default=0.25,
+                                 help='fraction of S8 cells kept for heavy S4 refinement '
+                                      '(0.25 -> ~75%% GFLOPs cut on the S4 branch).')
+        self.parser.add_argument('--no_safa_scale_adaptive', dest='safa_scale_adaptive',
+                                 action='store_false', default=True,
+                                 help='disable the per-query scale-adaptive level routing in the decoder.')
+        self.parser.add_argument('--use_entropy_aux', action='store_true', default=True,
+                                 help='supervise the SAFA entropy scorer with a center heatmap.')
+        self.parser.add_argument('--no_entropy_aux', dest='use_entropy_aux', action='store_false')
+        self.parser.add_argument('--entropy_weight', type=float, default=0.5)
+
+        # ── Fovea-MOT: SI-WBD bounding-box loss ─────────────────────────────
+        self.parser.add_argument('--use_siwbd', action='store_true', default=False,
+                                 help='Scale-Invariant Wasserstein-Bures box loss for tiny objects.')
+        self.parser.add_argument('--siwbd_C', type=float, default=0.5,
+                                 help='area-normalisation spread (smaller = sharper).')
+        self.parser.add_argument('--siwbd_weight', type=float, default=2.0)
+        self.parser.add_argument('--siwbd_replaces_giou', action='store_true', default=False,
+                                 help='use SI-WBD instead of GIoU (default: in addition to).')
+
+        # ── Fovea-MOT: T-UCL uncertainty-weighted ReID ──────────────────────
+        self.parser.add_argument('--use_tucl', action='store_true', default=False,
+                                 help='down-weight ReID loss on low-quality (small/blurry) boxes.')
+        self.parser.add_argument('--tucl_lambda', type=float, default=0.05,
+                                 help='weight of the -log(w) anti-collapse regulariser.')
+
         self.parser.add_argument('--cls_loss', default='mal',
                              choices=['mal', 'vfl', 'focal'],
                              help="Classification loss: mal (DEIM), vfl (raw IoU target), focal")

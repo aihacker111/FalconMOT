@@ -49,14 +49,21 @@ class MSDeformableAttention(nn.Module):
         num_points=4,
         method='default',
         offset_scale=0.5,
+        scale_adaptive=False,
+        scale_adaptive_tau=1.0,
+        scale_adaptive_gumbel=False,
     ):
         """Multi-Scale Deformable Attention
+
+        scale_adaptive: if True, attach a ScaleAdaptiveGate that routes the
+            per-level sampling budget by reference-box size (SAFA step 3).
         """
         super(MSDeformableAttention, self).__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_levels = num_levels
         self.offset_scale = offset_scale
+        self.scale_adaptive = scale_adaptive
 
         if isinstance(num_points, list):
             assert len(num_points) == num_levels, ''
@@ -81,6 +88,11 @@ class MSDeformableAttention(nn.Module):
         self.ms_deformable_attn_core = functools.partial(deformable_attention_core_func_v2, method=self.method)
 
         self._reset_parameters()
+
+        if self.scale_adaptive:
+            from ..ops.safa import ScaleAdaptiveGate
+            self.level_gate = ScaleAdaptiveGate(
+                num_levels, tau=scale_adaptive_tau, gumbel=scale_adaptive_gumbel)
 
         if method == 'discrete':
             for p in self.sampling_offsets.parameters():
@@ -125,6 +137,14 @@ class MSDeformableAttention(nn.Module):
 
         attention_weights = self.attention_weights(query).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
         attention_weights = F.softmax(attention_weights, dim=-1)
+
+        # SAFA step-3: route the per-level sampling budget by reference box size.
+        if self.scale_adaptive and reference_points.shape[-1] == 4 and self.num_levels > 1:
+            from ..ops.safa import apply_level_gate
+            ref_wh = reference_points[:, :, 0, 2:4]            # [bs, Len_q, 2] (w, h)
+            gate = self.level_gate(ref_wh)                     # [bs, Len_q, n_levels]
+            attention_weights = apply_level_gate(
+                attention_weights, gate, self.num_points_list)
 
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.tensor(value_spatial_shapes)
