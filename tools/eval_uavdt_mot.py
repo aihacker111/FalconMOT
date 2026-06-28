@@ -295,7 +295,7 @@ if __name__ == '__main__':
     img_root = getattr(opt, 'track_img_root', '/data/UAVDT-COCO/test/images')
     ann_file = getattr(opt, 'track_ann_file',
                        '/data/UAVDT-COCO/test/annotations/instances_test.json')
-    scheme_name = getattr(opt, 'uavdt_scheme', 'vehicle1')
+    scheme_name = getattr(opt, 'uavdt_scheme', 'uavdt3')
     assert scheme_name in UAVDT_SCHEMES, f'--uavdt_scheme must be one of {list(UAVDT_SCHEMES)}'
     assert osp.isdir(img_root), f'img_root not found: {img_root}'
     assert osp.isfile(ann_file), f'ann_file not found: {ann_file}'
