@@ -307,4 +307,4 @@ if __name__ == '__main__':
 
     main(opt, ann_file=ann_file, img_root=img_root,
          exp_name=f'falconmot_uavdt_{scheme_name}', scheme_name=scheme_name,
-         show_image=False, save_images=True)
+         show_image=False, save_images=False)
