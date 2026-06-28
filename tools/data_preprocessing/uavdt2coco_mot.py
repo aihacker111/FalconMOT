@@ -125,8 +125,22 @@ def bbox_from_exterior(ext):
     return float(x), float(y), float(abs(x2 - x1)), float(abs(y2 - y1))
 
 
+def _place_image(src, dst, mode, overwrite):
+    """Put the source image at dst via copy/symlink/hardlink (no-op if exists)."""
+    if os.path.islink(dst) or os.path.isfile(dst):
+        if not overwrite:
+            return
+        os.remove(dst)
+    if mode == 'symlink':
+        os.symlink(os.path.abspath(src), dst)
+    elif mode == 'hardlink':
+        os.link(src, dst)
+    else:
+        shutil.copy2(src, dst)
+
+
 def convert_split(split_root, dst_root, split, scheme, workers, overwrite,
-                  track_src, debug):
+                  track_src, debug, link_mode='copy', seq_prefix='M'):
     img_dir = os.path.join(split_root, 'img')
     ann_dir = os.path.join(split_root, 'ann')
     if not os.path.isdir(ann_dir):
@@ -144,6 +158,24 @@ def convert_split(split_root, dst_root, split, scheme, workers, overwrite,
             by_seq[seq].append((fr, af))
     if not by_seq:
         raise RuntimeError(f'No <SEQ>_img<N>.jpg.json files parsed in {ann_dir}')
+
+    # ── UAVDT keeps MOT (M****) and SOT (S****) under the same export. SOT clips
+    #    annotate a single object and must NOT be used for MOT evaluation. Filter
+    #    by sequence-name prefix (default 'M' = MOT only). Use --seq_prefix '' to keep all.
+    prefixes = sorted({s[0].upper() for s in by_seq})
+    if len(prefixes) > 1 and not seq_prefix:
+        print(f'  [WARN] mixed sequence prefixes {prefixes} (likely MOT M* + SOT S*). '
+              f'Pass --seq_prefix M to evaluate MOT only.')
+    if seq_prefix:
+        kept = {s: v for s, v in by_seq.items() if s.upper().startswith(seq_prefix.upper())}
+        skipped = sorted(set(by_seq) - set(kept))
+        if skipped:
+            print(f'  [seq_prefix={seq_prefix!r}] keeping {len(kept)} sequences, '
+                  f'skipping {len(skipped)} (e.g. {skipped[:5]}) -- SOT/non-MOT clips.')
+        by_seq = kept
+        if not by_seq:
+            raise RuntimeError(f'No sequences start with prefix {seq_prefix!r}; '
+                               f'available prefixes: {prefixes}')
 
     images_list, anns_list = [], []
     img_id = ann_id = 0
@@ -226,9 +258,8 @@ def convert_split(split_root, dst_root, split, scheme, workers, overwrite,
                     cv2.imwrite(dst_img, im)
                 return fr, (im.shape[0], im.shape[1])
             else:
-                if overwrite or not os.path.isfile(dst_img):
-                    if os.path.isfile(src_img):
-                        shutil.copy2(src_img, dst_img)
+                if os.path.isfile(src_img):
+                    _place_image(src_img, dst_img, link_mode, overwrite)
                 if H and W:
                     return fr, (H, W)
                 im = cv2.imread(dst_img)
@@ -293,6 +324,14 @@ def main():
                          "uavdt3 (native car/truck/bus).")
     ap.add_argument('--track_id_source', default='auto',
                     help="auto | objectKey | key | id | tag:<tagname>  (default auto).")
+    ap.add_argument('--seq_prefix', default='M',
+                    help="Keep only sequences whose name starts with this prefix. "
+                         "UAVDT MOT sequences are 'M****' and SOT are 'S****', so the "
+                         "default 'M' evaluates MOT only. Pass --seq_prefix '' to keep all.")
+    ap.add_argument('--link', choices=['copy', 'symlink', 'hardlink'], default='copy',
+                    help="How to place images in the output: copy (default), "
+                         "symlink (recommended on Kaggle to save disk), or hardlink. "
+                         "Frames with ignore regions are always written out (blacked).")
     ap.add_argument('--workers', type=int, default=8)
     ap.add_argument('--overwrite', action='store_true')
     ap.add_argument('--debug', action='store_true',
@@ -308,7 +347,8 @@ def main():
             print(f'[Error] not found: {split_root}')
             continue
         convert_split(split_root, os.path.join(args.output_root, split), split,
-                      scheme, args.workers, args.overwrite, args.track_id_source, args.debug)
+                      scheme, args.workers, args.overwrite, args.track_id_source,
+                      args.debug, args.link, args.seq_prefix)
 
 
 if __name__ == '__main__':
