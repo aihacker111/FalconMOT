@@ -9,21 +9,21 @@ import torch.utils.data
 from torchvision.transforms import transforms as T
 
 import _paths  # noqa: F401  (sys.path bootstrap)
-from falconmot.opts import opts
-from falconmot.models.model import create_model, load_model, save_model
-from falconmot.models.data_parallel import DataParallel
-from falconmot.logger import Logger
-from falconmot.datasets.dataset_factory import get_dataset
-from falconmot.engine.train_factory import train_factory
+from falconmot.cfg.args import opts
+from falconmot.nn import create_model, load_model, save_model
+from falconmot.nn.parallel import DataParallel
+from falconmot.utils.log import Logger
+from falconmot.data.factory import get_dataset
+from falconmot.engine.factory import train_factory
 from falconmot.engine import stage as stage_mgr
 from falconmot.optim import build_optimizer, build_scheduler
-from falconmot.utils.jde_eval import CocoJsonEvaluator
-from falconmot.models.falcon_jde.postprocessor import FalconJDEPostProcessor
+from falconmot.utils.eval import CocoJsonEvaluator
+from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
 from collections import defaultdict as _defaultdict
 from falconmot.tracker.multitracker import MCJDETracker, MCTrack
-from falconmot.tracking_utils.coco_gt_reader import CocoGTEvaluator
-from falconmot.tracking_utils.evaluation import Evaluator
-from falconmot.datasets.dataset.coco_detection import LoadCocoSequencesForTracking
+from falconmot.tracker.utils.coco_gt_reader import CocoGTEvaluator
+from falconmot.tracker.utils.evaluation import Evaluator
+from falconmot.data.dataset import LoadCocoSequencesForTracking
 
 
 def _with_lr(opt, lr):
@@ -222,7 +222,7 @@ def run(opt):
     dataset_root = data_config['root']
     print("Dataset root: %s" % dataset_root)
 
-    from falconmot.datasets.dataset.coco_detection import VisDroneCocoDataset
+    from falconmot.data.dataset import VisDroneCocoDataset
 
     if use_coco_fmt:
         train_sources = data_config.get('train_sources')
