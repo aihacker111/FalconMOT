@@ -482,7 +482,7 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         reid_use_s4_dense=getattr(opt, 'reid_use_s4_dense', False),
         reid_s4_in_ch=getattr(opt, 'conv_inplane', 32),
         use_safa=getattr(opt, 'use_safa', False),
-        safa_keep_ratio=getattr(opt, 'safa_keep_ratio', 0.25),
+        safa_keep_ratio=getattr(opt, 'safa_keep_ratio', 1.0),
     )
 
     ckpt_path = getattr(opt, 'deim_pretrained', '')
