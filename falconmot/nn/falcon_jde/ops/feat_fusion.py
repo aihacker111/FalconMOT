@@ -210,28 +210,80 @@ def _draw_gaussian(hmap: torch.Tensor, cx: int, cy: int, radius: int):
     torch.maximum(masked_h, masked_g, out=masked_h)
 
 
+# @torch.no_grad()
+# def build_center_heatmaps(targets, H: int, W: int, device,
+#                           min_overlap: float = 0.7):
+#     """Generate the target Gaussian heatmap for the whole batch.
+#     targets[b]['boxes'] : [Ni,4] cxcywh normalized to [0,1].
+#     Returns [B,1,H,W]. (Tip: move this into the dataloader/collate to take it off
+#     the GPU path -> even faster.)
+#     """
+#     B = len(targets)
+#     hm = torch.zeros((B, 1, H, W), device=device)
+#     for b in range(B):
+#         boxes = targets[b]['boxes']
+#         if boxes.numel() == 0:
+#             continue
+#         cx = (boxes[:, 0] * W).clamp(0, W - 1)
+#         cy = (boxes[:, 1] * H).clamp(0, H - 1)
+#         bw = (boxes[:, 2] * W).clamp(min=1)
+#         bh = (boxes[:, 3] * H).clamp(min=1)
+#         for i in range(boxes.shape[0]):
+#             r = _gaussian_radius(float(bh[i]), float(bw[i]), min_overlap)
+#             _draw_gaussian(hm[b, 0], int(cx[i]), int(cy[i]), r)
+#     return hm
+
+
+
+
+
+# Trong feat_fusion.py
 @torch.no_grad()
-def build_center_heatmaps(targets, H: int, W: int, device,
-                          min_overlap: float = 0.7):
-    """Generate the target Gaussian heatmap for the whole batch.
-    targets[b]['boxes'] : [Ni,4] cxcywh normalized to [0,1].
-    Returns [B,1,H,W]. (Tip: move this into the dataloader/collate to take it off
-    the GPU path -> even faster.)
+def build_center_heatmaps(targets, H: int, W: int, device, min_overlap: float = 0.7):
+    """
+    [MODIFIED cho DMFR] Trả về cả max_heatmap (để làm target) và density_map (để re-weight loss)
     """
     B = len(targets)
     hm = torch.zeros((B, 1, H, W), device=device)
+    density = torch.zeros((B, 1, H, W), device=device) # [Thêm mới]
+    
+    y = torch.arange(H, device=device, dtype=torch.float32)
+    x = torch.arange(W, device=device, dtype=torch.float32)
+    yy, xx = torch.meshgrid(y, x, indexing='ij')
+
     for b in range(B):
         boxes = targets[b]['boxes']
         if boxes.numel() == 0:
             continue
-        cx = (boxes[:, 0] * W).clamp(0, W - 1)
-        cy = (boxes[:, 1] * H).clamp(0, H - 1)
+            
+        cx = (boxes[:, 0] * W)
+        cy = (boxes[:, 1] * H)
         bw = (boxes[:, 2] * W).clamp(min=1)
         bh = (boxes[:, 3] * H).clamp(min=1)
-        for i in range(boxes.shape[0]):
-            r = _gaussian_radius(float(bh[i]), float(bw[i]), min_overlap)
-            _draw_gaussian(hm[b, 0], int(cx[i]), int(cy[i]), r)
-    return hm
+
+        a1 = 1.0; b1 = bh + bw; c1 = bw * bh * (1 - min_overlap) / (1 + min_overlap)
+        r1 = (b1 - torch.sqrt(torch.clamp(b1*b1 - 4*a1*c1, min=0))) / 2
+        a2 = 4.0; b2 = 2 * (bh + bw); c2 = (1 - min_overlap) * bw * bh
+        r2 = (b2 - torch.sqrt(torch.clamp(b2*b2 - 4*a2*c2, min=0))) / 2
+        a3 = 4 * min_overlap; b3 = -2 * min_overlap * (bh + bw); c3 = (min_overlap - 1) * bw * bh
+        r3 = (b3 + torch.sqrt(torch.clamp(b3*b3 - 4*a3*c3, min=0))) / 2
+
+        r = torch.min(torch.stack([r1, r2, r3], dim=0), dim=0).values
+        r = torch.clamp(r, min=1.0)
+        sigma = (2 * r + 1) / 6.0
+
+        dist = (xx.unsqueeze(0) - cx.unsqueeze(-1).unsqueeze(-1))**2 + \
+               (yy.unsqueeze(0) - cy.unsqueeze(-1).unsqueeze(-1))**2
+               
+        gaussians = torch.exp(-dist / (2 * sigma.unsqueeze(-1).unsqueeze(-1)**2))
+        
+        # Original: Max heatmap cho classification
+        hm[b, 0] = torch.max(gaussians, dim=0).values
+        
+        # [Thêm mới]: Sum density cho DMFR (Local Crowd Density)
+        density[b, 0] = torch.sum(gaussians, dim=0)
+        
+    return hm, density # Trả về tuple
 
 
 
@@ -296,20 +348,48 @@ def build_center_heatmaps(targets, H: int, W: int, device,
 #     return hm
 
 
+# def gaussian_focal_loss(pred_logits: torch.Tensor, gt_heatmap: torch.Tensor,
+#                         alpha: float = 2.0, beta: float = 4.0,
+#                         eps: float = 1e-6) -> torch.Tensor:
+#     """Penalty-reduced focal loss (CenterNet).
+#     - pred_logits : [B,1,H,W] (logit, sigmoid is applied internally)
+#     - gt_heatmap  : [B,1,H,W] (Gaussian soft target, peak = 1.0)
+#     Gradients concentrate near the center and easy negatives are down-weighted -> no starvation.
+#     """
+#     pred = pred_logits.sigmoid().clamp(eps, 1 - eps)
+#     pos = gt_heatmap.eq(1.0).float()
+#     neg = 1.0 - pos
+#     neg_weights = (1.0 - gt_heatmap).pow(beta)
+
+#     pos_loss = -torch.log(pred) * (1 - pred).pow(alpha) * pos
+#     neg_loss = -torch.log(1 - pred) * pred.pow(alpha) * neg_weights * neg
+
+#     num_pos = pos.sum().clamp(min=1.0)
+#     return (pos_loss.sum() + neg_loss.sum()) / num_pos
+
+
+
+# Trong feat_fusion.py
 def gaussian_focal_loss(pred_logits: torch.Tensor, gt_heatmap: torch.Tensor,
+                        density_map: torch.Tensor = None, # [Thêm mới]
                         alpha: float = 2.0, beta: float = 4.0,
+                        gamma_crowd: float = 0.5, # [Thêm mới] Cường độ DMFR
                         eps: float = 1e-6) -> torch.Tensor:
-    """Penalty-reduced focal loss (CenterNet).
-    - pred_logits : [B,1,H,W] (logit, sigmoid is applied internally)
-    - gt_heatmap  : [B,1,H,W] (Gaussian soft target, peak = 1.0)
-    Gradients concentrate near the center and easy negatives are down-weighted -> no starvation.
-    """
+    """Penalty-reduced focal loss with Density-Modulated Foveal Routing (DMFR)"""
     pred = pred_logits.sigmoid().clamp(eps, 1 - eps)
     pos = gt_heatmap.eq(1.0).float()
     neg = 1.0 - pos
     neg_weights = (1.0 - gt_heatmap).pow(beta)
 
-    pos_loss = -torch.log(pred) * (1 - pred).pow(alpha) * pos
+    # Nếu có bản đồ mật độ, khuếch đại loss ở những vùng chồng chéo (Crowd Amplifier)
+    if density_map is not None:
+        crowd_amplifier = 1.0 + gamma_crowd * density_map
+    else:
+        crowd_amplifier = 1.0
+
+    # DMFR chỉ tác động lên positive loss (những điểm thực sự là tâm vật thể)
+    pos_loss = -torch.log(pred) * (1 - pred).pow(alpha) * pos * crowd_amplifier
+    
     neg_loss = -torch.log(1 - pred) * pred.pow(alpha) * neg_weights * neg
 
     num_pos = pos.sum().clamp(min=1.0)

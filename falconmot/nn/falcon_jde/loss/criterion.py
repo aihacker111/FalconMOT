@@ -500,21 +500,35 @@ class FalconJDECriterion(nn.Module):
         losses['loss_s4_aux'] = gaussian_focal_loss(pred, gt)
         return losses
 
-    def loss_entropy(self, outputs, targets, indices, num_boxes):
-        """Supervise the SAFA entropy scorer (S8) with a Gaussian center heatmap.
+    # def loss_entropy(self, outputs, targets, indices, num_boxes):
+    #     """Supervise the SAFA entropy scorer (S8) with a Gaussian center heatmap.
 
-        Teaches the scorer *where* objects are, so the top-rho keep-mask routes
-        the expensive S4 compute to object regions — the premise of the GFLOPs
-        reduction.
-        """
+    #     Teaches the scorer *where* objects are, so the top-rho keep-mask routes
+    #     the expensive S4 compute to object regions — the premise of the GFLOPs
+    #     reduction.
+    #     """
+    #     dev = outputs['pred_logits'].device
+    #     losses = {'loss_entropy': torch.tensor(0.0, device=dev)}
+    #     if 'pred_entropy' not in outputs:
+    #         return losses
+    #     pred = outputs['pred_entropy']                # [B,1,H8,W8] logit
+    #     _, _, H, W = pred.shape
+    #     gt = build_center_heatmaps(targets, H, W, dev)
+    #     losses['loss_entropy'] = gaussian_focal_loss(pred, gt)
+    #     return losses
+    def loss_entropy(self, outputs, targets, indices, num_boxes):
         dev = outputs['pred_logits'].device
         losses = {'loss_entropy': torch.tensor(0.0, device=dev)}
         if 'pred_entropy' not in outputs:
             return losses
-        pred = outputs['pred_entropy']                # [B,1,H8,W8] logit
+        pred = outputs['pred_entropy']
         _, _, H, W = pred.shape
-        gt = build_center_heatmaps(targets, H, W, dev)
-        losses['loss_entropy'] = gaussian_focal_loss(pred, gt)
+        
+        # [Thay đổi]: Nhận cả gt và density map
+        gt, density = build_center_heatmaps(targets, H, W, dev)
+        
+        # [Thay đổi]: Pass density map vào loss
+        losses['loss_entropy'] = gaussian_focal_loss(pred, gt, density_map=density)
         return losses
 
     # ==================================================================
