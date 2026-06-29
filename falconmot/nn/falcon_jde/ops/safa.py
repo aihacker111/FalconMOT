@@ -199,13 +199,8 @@ def _straight_through_topk_mask(prob: torch.Tensor, keep_ratio: float,
 
 class SparseFeatFusion(nn.Module):
     """
-    Entropy-gated stride-4 fusion with Unified Bottleneck DFM.
-    
-    Áp dụng kỹ thuật Cổ chai (Bottleneck): Ép số channel xuống 4 lần 
-    trước khi phóng to ảnh lên 4 lần diện tích (Zoom x2).
-    GFLOPs được bù trừ hoàn hảo (Net cost = 0), thân thiện với ONNX.
+    Entropy-gated stride-4 fusion with Unified Bottleneck DFM (Fixed Version).
     """
-
     def __init__(self, c1_ch: int, hidden_dim: int, mid_dim: Optional[int] = None,
                  n_blocks: int = 2, expand: float = 2.0, scorer_in_ch: Optional[int] = None,
                  keep_ratio: float = 0.25, tau: Optional[float] = None,
@@ -221,26 +216,17 @@ class SparseFeatFusion(nn.Module):
             nn.Conv2d(mid, mid, 3, padding=1, groups=mid, bias=True), nn.Sigmoid())
         self.alpha = nn.Parameter(torch.tensor(1.0))
 
-        # ==========================================================
-        # [THÊM MỚI]: BỘ NÉN CỔ CHAI (BOTTLENECK) ĐỂ CỨU GFLOPs
-        # ==========================================================
-        zoom_dim = max(16, mid // 4) # Ép channel xuống 4 lần (VD: 128 -> 32)
-        
-        self.compress = nn.Conv2d(mid, zoom_dim, 1, bias=False) # Nén
-        
-        # Khối ConvNeXtV2 giờ chỉ chạy trên số lượng channel cực nhỏ
+        # Bộ nén cổ chai (Bottleneck)
+        zoom_dim = max(16, mid // 4) 
+        self.compress = nn.Conv2d(mid, zoom_dim, 1, bias=False)
         self.blocks = nn.Sequential(*[ConvNeXtV2Block(zoom_dim, expand, k=7) for _ in range(n_blocks)])
-        
-        self.expand_conv = nn.Conv2d(zoom_dim, mid, 1, bias=False) # Bung ra lại
-        # ==========================================================
+        self.expand_conv = nn.Conv2d(zoom_dim, mid, 1, bias=False)
 
         self.out = nn.Conv2d(mid, hidden_dim, 1, bias=False)
         self.out_norm = LayerNorm2d(hidden_dim)
-
         self.scorer = EntropyScorer(scorer_in_ch or hidden_dim)
 
-    def forward(self, c1: torch.Tensor, s8: torch.Tensor,
-                return_mask: bool = False):
+    def forward(self, c1: torch.Tensor, s8: torch.Tensor, return_mask: bool = False):
         d = self.detail(c1)                                   
         s = self.sem(s8)
         s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False)
@@ -252,37 +238,33 @@ class SparseFeatFusion(nn.Module):
         mask_s8 = _straight_through_topk_mask(prob, self.keep_ratio, self.tau)
         mask_s4 = F.interpolate(mask_s8, size=d.shape[-2:], mode='nearest')
 
-        # =====================================================================
         # UNIFIED DYNAMIC FOVEAL MAGNIFICATION (BOTTLENECK DFM)
-        # =====================================================================
         zoom_scale = 2.0
         
-        # 1. Nén Channel: Giảm 4 lần khối lượng tính toán
+        # 1. Nén Channel
         x0_compressed = self.compress(x0)
         
-        # 2. Phóng to ảnh (Zoom in): Tăng 4 lần khối lượng tính toán (Bù trừ = 0)
+        # 2. Zoom in không gian
         x0_zoomed = F.interpolate(x0_compressed, scale_factor=zoom_scale, mode='bilinear', align_corners=False)
         mask_zoomed = F.interpolate(mask_s4, scale_factor=zoom_scale, mode='nearest')
         
-        # 3. Học chi tiết nhỏ trên ảnh đã Zoom (GFLOPs siêu thấp vì channel rất nhỏ)
+        # 3. Tiến hành feature mixing qua các khối ConvNeXtV2 trên ảnh Zoom
         refined_zoomed = self.blocks(x0_zoomed * mask_zoomed)
         zoomed_res = mask_zoomed * refined_zoomed + (1.0 - mask_zoomed) * x0_zoomed
         
-        # 4. Thu nhỏ ảnh (Zoom out)
+        # 4. Zoom out (Sửa lỗi dùng size cứng của x0 để an toàn cho ONNX)
         refined_compressed = F.interpolate(
             zoomed_res,
-            scale_factor=1.0 / zoom_scale,        # 0.5 -> trùng khớp với zoom_scale=2.0
+            size=x0.shape[-2:],        
             mode='bilinear',
             align_corners=False,
-            recompute_scale_factor=False,         # QUAN TRỌNG: giữ scales tĩnh, không tính size từ shape
         )
         
         # 5. Phục hồi Channel
         refined = self.expand_conv(refined_compressed)
-        # =====================================================================
 
-        # Cộng Residual để tránh mất mát thông tin nền (Skip Connection)
-        out = self.out_norm(self.out(x0 + refined))
+        # SỬA LỖI: Không cộng thêm x0 vào đây nữa để tránh hiện tượng Double X0
+        out = self.out_norm(self.out(refined))
         
         if return_mask:
             return out, ent_logit, mask_s4
