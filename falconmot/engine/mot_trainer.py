@@ -22,9 +22,9 @@ def _build_criterion(opt) -> FalconJDECriterion:
         use_focal_loss       = True,
         alpha                = 0.25,
         gamma                = 2.0,
-        change_matcher       = getattr(opt, 'change_matcher', True),
+        change_matcher       = getattr(opt, 'change_matcher', False),
         iou_order_alpha      = getattr(opt, 'iou_order_alpha', 4.0),
-        matcher_change_epoch = getattr(opt, 'matcher_change_epoch', 40),
+        matcher_change_epoch = getattr(opt, 'matcher_change_epoch', 100),
     )
 
     use_s4_aux = getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', False)
