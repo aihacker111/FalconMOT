@@ -293,32 +293,16 @@ class LightUpsample(nn.Module):
         return F.interpolate(x, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
 
 
-# class PerPixelGatedFusion(nn.Module):
-#     """Lightweight per-pixel content-aware mixing gate: a single 1x1 conv -> 1 gate channel.
-#     Drops the redundant 3x3 proj (the following RepNCSPELAN fpn/pan blocks already fuse with convs)
-#     and the heavy 3x3 gate. Saves ~2.66M params + many FLOPs while keeping content-aware gating."""
-#     def __init__(self, ch):
-#         super().__init__()
-#         self.gate = nn.Conv2d(ch * 2, 1, kernel_size=1)
-
-#     def forward(self, semantic_feat, detail_feat):
-#         g = torch.sigmoid(self.gate(torch.cat([semantic_feat, detail_feat], dim=1)))
-#         return g * semantic_feat + (1.0 - g) * detail_feat
-
-
-
 class PerPixelGatedFusion(nn.Module):
-    """
-    [FIXED] Ultra-lightweight content-aware mixing gate.
-    Removed torch.cat to save 50% parameters and FLOPs. Semantic features already
-    contain enough spatial prior to determine the gate.
-    """
+    """Lightweight per-pixel content-aware mixing gate: a single 1x1 conv -> 1 gate channel.
+    Drops the redundant 3x3 proj (the following RepNCSPELAN fpn/pan blocks already fuse with convs)
+    and the heavy 3x3 gate. Saves ~2.66M params + many FLOPs while keeping content-aware gating."""
     def __init__(self, ch):
         super().__init__()
-        self.gate = nn.Conv2d(ch, 1, kernel_size=1, bias=True)
+        self.gate = nn.Conv2d(ch * 2, 1, kernel_size=1)
 
     def forward(self, semantic_feat, detail_feat):
-        g = torch.sigmoid(self.gate(semantic_feat))
+        g = torch.sigmoid(self.gate(torch.cat([semantic_feat, detail_feat], dim=1)))
         return g * semantic_feat + (1.0 - g) * detail_feat
 
 
