@@ -42,12 +42,12 @@ import _paths  # noqa: F401  (sys.path bootstrap)
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-from falconmot.models.model import create_model, load_model
-from falconmot.models.falcon_jde.postprocessor import FalconJDEPostProcessor
-from falconmot.tracking_utils.log import logger
-from falconmot.tracking_utils.timer import Timer
-import falconmot.datasets.dataset.jde as datasets
-from falconmot.opts import opts
+from falconmot.nn import create_model, load_model
+from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
+from falconmot.utils.log import logger
+from falconmot.tracker.utils.timer import Timer
+import falconmot.data.dataset as datasets
+from falconmot.cfg.args import opts
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ def main(opt):
 
     for seq in seq_bar:
         gt_dict, ignore_dict = parse_visdrone_gt(osp.join(ann_dir, f'{seq}.txt'))
-        loader      = datasets.LoadImages(osp.join(seq_root, seq), opt.img_size)
+        loader      = datasets.LoadImagesForTracking(osp.join(seq_root, seq), opt.img_size)
         seq_frames  = 0
         seq_timer   = Timer()
 

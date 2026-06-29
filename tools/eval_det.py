@@ -37,9 +37,9 @@ import numpy as np
 import cv2
 import torch
 
-from falconmot.opts import opts
-from falconmot.models.model import create_model, load_model
-from falconmot.models.falcon_jde import FalconJDEPostProcessor
+from falconmot.cfg.args import opts
+from falconmot.nn import create_model, load_model
+from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
 
 _IMG_EXTS = ('.jpg', '.jpeg', '.png', '.bmp')
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)
