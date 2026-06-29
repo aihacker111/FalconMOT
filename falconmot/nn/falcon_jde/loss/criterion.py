@@ -22,7 +22,7 @@ from ..ops.box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
 from falconmot.nn.falcon_jde.loss.matcher import HungarianMatcher
 from ..ops.utils import bbox2distance
 from ..ops.feat_fusion import build_center_heatmaps, gaussian_focal_loss
-from .siwbd import si_wbd_loss
+from .siwbd import si_wbd_loss, size_blend_lambda
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,11 @@ class FalconJDECriterion(nn.Module):
         siwbd_replaces_giou: bool  = False,   # DEPRECATED alias -> box_reg_mode='replace'
         box_reg_mode:        str   = None,    # 'add' | 'replace' | 'blend' (overlap-reg term)
         siwbd_beta:          float = 1.0,     # blend: size-gate sharpness (dimensionless)
-        siwbd_logstd_floor:  float = 0.5,     # blend: min log-area std (anti-degenerate)
+        siwbd_logstd_floor:  float = 0.5,     # blend: (DEPRECATED w/ absolute gate) min log-area std
+        siwbd_gate_center:   float = 0.003,   # blend: ranh giới nhỏ/lớn (diện tích chuẩn hóa) ≈32^2px@960x544
+        siwbd_gate_scale:    float = 1.0,     # blend: độ rộng chuyển tiếp (log-area units)
+        siwbd_gate_dynamic:  bool  = False,   # blend: EMA-track ngưỡng theo dataset thay vì cố định
+        siwbd_gate_momentum: float = 0.99,    # blend: momentum của EMA log-center (chỉ khi dynamic)
         use_tucl:            bool  = False,    # uncertainty-weighted ReID (T-UCL)
         tucl_lambda:         float = 0.05,    # weight of the -log(w) regulariser
         use_entropy_aux:     bool  = False,   # supervise the SAFA entropy scorer
@@ -155,6 +159,13 @@ class FalconJDECriterion(nn.Module):
         self.box_reg_mode        = box_reg_mode
         self.siwbd_beta          = siwbd_beta
         self.siwbd_logstd_floor  = siwbd_logstd_floor
+        self.siwbd_gate_center   = siwbd_gate_center
+        self.siwbd_gate_scale    = siwbd_gate_scale
+        self.siwbd_gate_dynamic  = siwbd_gate_dynamic
+        self.siwbd_gate_momentum = siwbd_gate_momentum
+        # EMA log-center (động): khởi tạo từ ngưỡng tĩnh, persist trong checkpoint.
+        self.register_buffer('siwbd_log_center',
+                             torch.tensor(math.log(max(siwbd_gate_center, 1e-8))))
         self.use_tucl            = use_tucl
         self.tucl_lambda         = tucl_lambda
         self.use_entropy_aux     = use_entropy_aux
@@ -270,13 +281,16 @@ class FalconJDECriterion(nn.Module):
             # The gate self-tunes in log-area space: split at the batch's own median
             # object size, sharpness scales with its size spread. No fixed threshold;
             # adapts per dataset / resolution. area_gt detached (targets carry no grad).
+            # [MODIFIED] Gate NGƯỠNG TUYỆT ĐỐI thay cho trung vị batch: vật thực sự
+            # nhỏ (area < siwbd_gate_center) luôn nghiêng SI-WBD, bất kể batch có gì.
+            # area_gt detached (targets carry no grad). Dùng hàm chung với matcher.
             area = (tgt_boxes[:, 2].clamp(min=0) * tgt_boxes[:, 3].clamp(min=0)).detach()
-            la = torch.log(area.clamp(min=1e-8))
-            center = la.median()
-            scale = la.std() if la.numel() > 1 else torch.as_tensor(float('nan'), device=la.device)
-            if not torch.isfinite(scale) or scale < self.siwbd_logstd_floor:
-                scale = torch.as_tensor(self.siwbd_logstd_floor, device=la.device)
-            lam = torch.sigmoid((center - la) / (self.siwbd_beta * scale))
+            log_center = self.siwbd_log_center if self.siwbd_gate_dynamic else None
+            lam = size_blend_lambda(area,
+                                    center_area=self.siwbd_gate_center,
+                                    scale=self.siwbd_gate_scale,
+                                    beta=self.siwbd_beta,
+                                    log_center=log_center)
             reg = (1.0 - lam) * giou + lam * siwbd                          # single signal
             if boxes_weight is not None:
                 reg = reg * boxes_weight
@@ -608,6 +622,22 @@ class FalconJDECriterion(nn.Module):
     # Forward
     # ==================================================================
     def forward(self, outputs, targets, epoch: int = 0):
+        # [NEW] Dynamic gate: EMA-track trung vị log-area của dataset từ GT của batch,
+        # CẬP NHẬT TRƯỚC khi matching để matcher và loss cùng dùng một center.
+        if self.use_siwbd and self.box_reg_mode == 'blend' and self.siwbd_gate_dynamic:
+            if self.training:
+                with torch.no_grad():
+                    areas = [(t['boxes'][:, 2].clamp(min=0) * t['boxes'][:, 3].clamp(min=0))
+                             for t in targets if t['boxes'].numel() > 0]
+                    if len(areas) > 0:
+                        a = torch.cat(areas)
+                        if a.numel() > 0:
+                            cur = torch.log(a.clamp(min=1e-8)).median()
+                            m = self.siwbd_gate_momentum
+                            self.siwbd_log_center.mul_(m).add_(cur * (1.0 - m))
+            # Chia sẻ center hiện tại cho matcher (cả train lẫn eval).
+            self.matcher.siwbd_log_center_dyn = self.siwbd_log_center
+
         outputs_no_aux = {k: v for k, v in outputs.items() if 'aux' not in k}
         indices = self.matcher(outputs_no_aux, targets, epoch=epoch)['indices']
         self._clear_cache()

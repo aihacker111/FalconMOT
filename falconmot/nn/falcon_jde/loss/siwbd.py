@@ -33,7 +33,40 @@ W2^2 is dominated by large objects. Normalising by the target area makes a
 C controls the spread; smaller C -> sharper. With C ~ O(1) the loss is in (0,1)
 and behaves like a soft, scale-balanced IoU surrogate.
 """
+import math
 import torch
+
+
+def size_blend_lambda(area: torch.Tensor,
+                      center_area: float = 0.003,
+                      scale: float = 1.0,
+                      beta: float = 1.0,
+                      log_center=None,
+                      eps: float = 1e-8) -> torch.Tensor:
+    """Size gate for the 'blend' overlap mode (shared by criterion & matcher).
+
+    Trả về lam in (0,1): vật NHỎ hơn ngưỡng -> lam→1 (nghiêng SI-WBD),
+    vật LỚN hơn ngưỡng -> lam→0 (nghiêng GIoU).
+
+    Ngưỡng có thể là:
+      • TĨNH    : truyền center_area (diện tích chuẩn hóa). Mặc định 0.003 ≈ 32^2px@960x544.
+      • ĐỘNG    : truyền log_center (scalar/tensor = log của ngưỡng), ví dụ EMA trung vị
+                  log-area của dataset. Khi có log_center thì center_area bị bỏ qua.
+
+    Args:
+        area:        diện tích box ĐÃ CHUẨN HÓA (w*h, w,h in [0,1]). [N]
+        center_area: ngưỡng tĩnh theo diện tích chuẩn hóa (dùng khi log_center=None).
+        scale:       độ rộng chuyển tiếp của sigmoid, theo đơn vị log-area.
+        beta:        hệ số nhân thêm lên scale (tương thích siwbd_beta cũ).
+        log_center:  (tùy chọn) log của ngưỡng động; ưu tiên hơn center_area.
+    """
+    la = torch.log(area.clamp(min=eps))
+    if log_center is None:
+        c = math.log(max(center_area, eps))
+    else:
+        c = log_center                                   # scalar hoặc tensor (broadcast)
+    s = max(float(scale), eps)
+    return torch.sigmoid((c - la) / (beta * s))
 
 
 def gaussian_w2_sq(pred_cxcywh: torch.Tensor, tgt_cxcywh: torch.Tensor,

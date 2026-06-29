@@ -179,7 +179,7 @@ from scipy.optimize import linear_sum_assignment
 from typing import Dict
 
 from ..ops.box_ops import box_cxcywh_to_xyxy, generalized_box_iou, box_iou
-from .siwbd import gaussian_w2_sq  # hàm tính 2-Wasserstein^2 closed-form
+from .siwbd import gaussian_w2_sq, size_blend_lambda  # W2^2 closed-form + size gate dùng chung
 import numpy as np
 
 
@@ -209,6 +209,9 @@ class HungarianMatcher(nn.Module):
         # [NEW] Tham số size-gate cho blend (mirror criterion).
         self.siwbd_beta         = weight_dict.get('siwbd_beta', 1.0)
         self.siwbd_logstd_floor = weight_dict.get('siwbd_logstd_floor', 0.5)
+        # [MODIFIED] Gate ngưỡng tuyệt đối (mirror criterion.siwbd_gate_*).
+        self.siwbd_gate_center  = weight_dict.get('siwbd_gate_center', 0.003)
+        self.siwbd_gate_scale   = weight_dict.get('siwbd_gate_scale', 1.0)
 
         self.change_matcher       = change_matcher
         self.iou_order_alpha      = iou_order_alpha
@@ -249,19 +252,19 @@ class HungarianMatcher(nn.Module):
             return self.cost_giou * giou_cost + self.cost_siwbd * siwbd_cost
 
         # ----- blend: size-gated convex blend, gate theo GT (per-column) -----
-        # λ tự hiệu chỉnh trong không gian log-area: tách tại trung vị batch,
-        # độ sắc tỉ lệ với độ phân tán kích thước. Vật nhỏ -> λ→1 (SI-WBD).
+        # [MODIFIED] Gate NGƯỠNG TUYỆT ĐỐI (giống criterion): vật thực sự nhỏ
+        # -> λ→1 (SI-WBD), bất kể trung vị batch. Dùng chung size_blend_lambda.
         area = (tgt_bbox[:, 2].clamp(min=0) * tgt_bbox[:, 3].clamp(min=0))       # [N_gt]
-        la   = torch.log(area.clamp(min=1e-8))                                   # [N_gt]
-        if la.numel() == 0:
-            lam = la                                                            # rỗng, an toàn
+        if area.numel() == 0:
+            lam = area                                                          # rỗng, an toàn
         else:
-            center = la.median()
-            scale  = la.std() if la.numel() > 1 else torch.as_tensor(
-                float('nan'), device=la.device)
-            if (not torch.isfinite(scale)) or scale < self.siwbd_logstd_floor:
-                scale = torch.as_tensor(self.siwbd_logstd_floor, device=la.device)
-            lam = torch.sigmoid((center - la) / (self.siwbd_beta * scale))       # [N_gt]
+            # Nếu criterion đẩy sang EMA log-center động thì ưu tiên dùng nó.
+            log_center = getattr(self, 'siwbd_log_center_dyn', None)
+            lam = size_blend_lambda(area,
+                                    center_area=self.siwbd_gate_center,
+                                    scale=self.siwbd_gate_scale,
+                                    beta=self.siwbd_beta,
+                                    log_center=log_center)                       # [N_gt]
         overlap = (1.0 - lam)[None, :] * giou_cost + lam[None, :] * siwbd_cost   # [N_q, N_gt]
         # Reuse trọng số cost_giou cho slot overlap đã trộn (mirror criterion,
         # nơi blend được ghi vào loss_giou slot weight 2.0).

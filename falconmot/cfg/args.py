@@ -116,9 +116,23 @@ class opts(object):
                                       "add=GIoU+SI-WBD (2 signals), replace=SI-WBD only, "
                                       "blend=size-gated convex mix (small->SI-WBD, large->GIoU).")
         self.parser.add_argument('--siwbd_beta', type=float, default=1.0,
-                                 help='blend: size-gate sharpness (dimensionless; smaller = harder '
-                                      'switch). The split point and scale are auto-computed from the '
-                                      "batch's log-area distribution -- no fixed area threshold.")
+                                 help='blend: size-gate sharpness multiplier (smaller = harder switch).')
+        self.parser.add_argument('--siwbd_gate_center', type=float, default=0.003,
+                                 help='blend: ABSOLUTE small/large boundary as NORMALISED box area '
+                                      '(w*h, w,h in [0,1]). Default 0.003 ~= 32^2 px on a 960x544 canvas. '
+                                      'Objects below this lean to SI-WBD, above to GIoU. Scale with '
+                                      'resolution: center ~= (s/W)*(s/H) for a side of s px.')
+        self.parser.add_argument('--siwbd_gate_scale', type=float, default=1.0,
+                                 help='blend: transition width of the gate in log-area units (fixed, '
+                                      'replaces the old batch-std estimate).')
+        self.parser.add_argument('--siwbd_gate_dynamic', action='store_true', default=False,
+                                 help='blend: EMA-track the gate center from the DATASET log-area '
+                                      'distribution instead of a fixed threshold. Stable (not per-batch '
+                                      'noisy) and auto-adapts to dataset/resolution. Init from '
+                                      '--siwbd_gate_center.')
+        self.parser.add_argument('--siwbd_gate_momentum', type=float, default=0.99,
+                                 help='blend: EMA momentum for the dynamic gate center (closer to 1 = '
+                                      'slower/steadier).')
         self.parser.add_argument('--siwbd_replaces_giou', action='store_true', default=False,
                                  help='DEPRECATED: equivalent to --box_reg_mode replace.')
 
@@ -186,7 +200,7 @@ class opts(object):
                                  help='quadratic LR warmup steps')
         self.parser.add_argument('--no_aug_epochs', type=int, default=2,
                                  help='final constant-LR epochs (no-aug phase)')
-        self.parser.add_argument('--lr_gamma', type=float, default=0.1,
+        self.parser.add_argument('--lr_gamma', type=float, default=0.5,
                                  help='min_lr = lr × lr_gamma (flat_cosine)')
         self.parser.add_argument('--lr_scheduler', type=str, default='flat_cosine',
                                  choices=['cosine', 'step', 'flat_cosine'])

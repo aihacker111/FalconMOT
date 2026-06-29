@@ -191,6 +191,8 @@ def _build_criterion(opt) -> FalconJDECriterion:
         matcher_wd['cost_siwbd']   = getattr(opt, 'cost_siwbd', 2.0)
         matcher_wd['box_reg_mode'] = box_reg_mode
         matcher_wd['siwbd_beta']   = getattr(opt, 'siwbd_beta', 1.0)
+        matcher_wd['siwbd_gate_center'] = getattr(opt, 'siwbd_gate_center', 0.003)
+        matcher_wd['siwbd_gate_scale']  = getattr(opt, 'siwbd_gate_scale', 1.0)
 
     matcher = HungarianMatcher(
         weight_dict          = matcher_wd,
@@ -255,6 +257,10 @@ def _build_criterion(opt) -> FalconJDECriterion:
         siwbd_replaces_giou = getattr(opt, 'siwbd_replaces_giou', False),
         box_reg_mode        = box_reg_mode,
         siwbd_beta          = getattr(opt, 'siwbd_beta', 1.0),
+        siwbd_gate_center   = getattr(opt, 'siwbd_gate_center', 0.003),
+        siwbd_gate_scale    = getattr(opt, 'siwbd_gate_scale', 1.0),
+        siwbd_gate_dynamic  = getattr(opt, 'siwbd_gate_dynamic', False),
+        siwbd_gate_momentum = getattr(opt, 'siwbd_gate_momentum', 0.99),
         use_tucl            = getattr(opt, 'use_tucl', False),
         tucl_lambda         = getattr(opt, 'tucl_lambda', 0.05),
         use_entropy_aux     = use_entropy_aux,
