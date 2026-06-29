@@ -42,8 +42,8 @@ import _paths  # noqa: F401  (sys.path bootstrap)
 import torch
 import torch.nn as nn
 
-from falconmot.opts import opts
-from falconmot.models.model import create_model, load_model
+from falconmot.cfg.args import opts
+from falconmot.nn import create_model, load_model
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +215,9 @@ if __name__ == '__main__':
     )
     eparser.add_argument('--onnx_path', default='falcon_jde.onnx',
                          help='output .onnx file path')
-    eparser.add_argument('--img_h', type=int, default=608,
+    eparser.add_argument('--img_h', type=int, default=544,
                          help='input height (must match training letterbox H)')
-    eparser.add_argument('--img_w', type=int, default=1088,
+    eparser.add_argument('--img_w', type=int, default=960,
                          help='input width (must match training letterbox W)')
     eparser.add_argument('--opset', type=int, default=17,
                          help='ONNX opset version')

@@ -44,7 +44,13 @@ def _build_criterion(opt) -> FalconJDECriterion:
 
     # ----- Fovea-MOT: SI-WBD box loss -----
     use_siwbd = getattr(opt, 'use_siwbd', False)
-    if use_siwbd:
+    # Resolve overlap-regression mode (back-compat: --siwbd_replaces_giou forces replace).
+    box_reg_mode = getattr(opt, 'box_reg_mode', 'blend')
+    if getattr(opt, 'siwbd_replaces_giou', False):
+        box_reg_mode = 'replace'
+    # loss_siwbd is a *separate* weighted term only in 'add' mode; in replace/blend
+    # the overlap signal lives in the loss_giou slot (weight 2.0).
+    if use_siwbd and box_reg_mode == 'add':
         weight_dict['loss_siwbd'] = getattr(opt, 'siwbd_weight', 2.0)
 
     # ----- Fovea-MOT: SAFA entropy supervision -----
@@ -76,6 +82,8 @@ def _build_criterion(opt) -> FalconJDECriterion:
         use_siwbd           = use_siwbd,
         siwbd_C             = getattr(opt, 'siwbd_C', 0.5),
         siwbd_replaces_giou = getattr(opt, 'siwbd_replaces_giou', False),
+        box_reg_mode        = box_reg_mode,
+        siwbd_beta          = getattr(opt, 'siwbd_beta', 1.0),
         use_tucl            = getattr(opt, 'use_tucl', False),
         tucl_lambda         = getattr(opt, 'tucl_lambda', 0.05),
         use_entropy_aux     = use_entropy_aux,
@@ -131,7 +139,11 @@ class MotTrainer(BaseTrainer):
         if getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', False):
             loss_states.append('loss_s4_aux')
         if getattr(opt, 'use_siwbd', False):
-            loss_states.append('loss_siwbd')
+            _brm = getattr(opt, 'box_reg_mode', 'blend')
+            if getattr(opt, 'siwbd_replaces_giou', False):
+                _brm = 'replace'
+            if _brm == 'add':
+                loss_states.append('loss_siwbd')
         if getattr(opt, 'use_safa', False) and getattr(opt, 'use_entropy_aux', True):
             loss_states.append('loss_entropy')
         criterion = _build_criterion(opt)

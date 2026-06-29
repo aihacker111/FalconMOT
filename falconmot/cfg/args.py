@@ -108,9 +108,19 @@ class opts(object):
                                  help='Scale-Invariant Wasserstein-Bures box loss for tiny objects.')
         self.parser.add_argument('--siwbd_C', type=float, default=0.5,
                                  help='area-normalisation spread (smaller = sharper).')
-        self.parser.add_argument('--siwbd_weight', type=float, default=2.0)
+        self.parser.add_argument('--siwbd_weight', type=float, default=2.0,
+                                 help='weight of loss_siwbd (only used in box_reg_mode=add).')
+        self.parser.add_argument('--box_reg_mode', default='blend',
+                                 choices=['add', 'replace', 'blend'],
+                                 help="overlap-regression term when --use_siwbd: "
+                                      "add=GIoU+SI-WBD (2 signals), replace=SI-WBD only, "
+                                      "blend=size-gated convex mix (small->SI-WBD, large->GIoU).")
+        self.parser.add_argument('--siwbd_beta', type=float, default=1.0,
+                                 help='blend: size-gate sharpness (dimensionless; smaller = harder '
+                                      'switch). The split point and scale are auto-computed from the '
+                                      "batch's log-area distribution -- no fixed area threshold.")
         self.parser.add_argument('--siwbd_replaces_giou', action='store_true', default=False,
-                                 help='use SI-WBD instead of GIoU (default: in addition to).')
+                                 help='DEPRECATED: equivalent to --box_reg_mode replace.')
 
         # ── Fovea-MOT: T-UCL uncertainty-weighted ReID ──────────────────────
         self.parser.add_argument('--use_tucl', action='store_true', default=False,
@@ -327,12 +337,12 @@ class opts(object):
                                  help='motion-distance spatial gate: motion can vouch for a '
                                       'low-IoU pair only if its motion_dist is below this.')
         # -- Tracking-metric validation (select model_best by IDF1/MOTA) --
-        self.parser.add_argument('--emb_weight', type=float, default=1.0,
-                                 help='ReID weight in association fusion. '
-                                      '1.0=original, 0.0=IoU-only, in-between=blend.')
-        self.parser.add_argument('--emb_gate', type=float, default=0.0,
-                                 help='Apply the embedding only when id_sim >= this threshold; '
-                                      'below it, use pure IoU. 0.0 = disable gating.')
+        # self.parser.add_argument('--emb_weight', type=float, default=1.0,
+        #                          help='ReID weight in association fusion. '
+        #                               '1.0=original, 0.0=IoU-only, in-between=blend.')
+        # self.parser.add_argument('--emb_gate', type=float, default=0.0,
+        #                          help='Apply the embedding only when id_sim >= this threshold; '
+        #                               'below it, use pure IoU. 0.0 = disable gating.')
         self.parser.add_argument('--track_val', action='store_true',
                                  help='enable tracking validation (IDF1/MOTA) to select model_best '
                                       'instead of COCO mAP. Requires --val_cfg with val_ann + val_img (COCO).')
@@ -352,18 +362,6 @@ class opts(object):
         # ── Tracker (FusionTrack-inspired, inference-only) ───────────────
         self.parser.add_argument('--reid_decay_alpha', type=float, default=0.02,
                                  help='time-decay rate for gallery ReID memory (W=e^{-alpha*dt}); 0 = no decay')
-        self.parser.add_argument('--nfm_topk', type=int, default=2,
-                                 help='mutual top-k for Neighbor Filtering gate on appearance matches')
-        self.parser.add_argument('--use_nfm', action='store_true', default=True,
-                                 help='enable mutual top-k NFM gating (reduces ID switches)')
-        self.parser.add_argument('--no_nfm', dest='use_nfm', action='store_false')
-        # -- GMC determinism + w_iou ramp (stable benchmarking) --
-        self.parser.add_argument('--gmc_seed', type=int, default=0,
-                                 help='seed the OpenCV RNG for RANSAC in GMC -> reproducible benchmarks')
-        self.parser.add_argument('--gmc_deterministic', action='store_true', default=True,
-                                 help='re-seed the cv2 RNG every frame for deterministic RANSAC')
-        self.parser.add_argument('--no_gmc_deterministic', dest='gmc_deterministic',
-                                 action='store_false')
         self.parser.add_argument('--w_iou_hi', type=float, default=0.5,
                                  help='IoU weight when GMC is reliable (small camera motion)')
         self.parser.add_argument('--w_iou_lo', type=float, default=0.3,

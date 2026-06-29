@@ -90,10 +90,11 @@ def _straight_through_topk_mask(prob: torch.Tensor, keep_ratio: float,
     """
     B, _, H, W = prob.shape
     flat = prob.flatten(1)                        # [B, H*W]
-    n = flat.shape[1]
+    n = int(flat.shape[1])                        # static int (constant under trace)
     k = max(1, int(round(keep_ratio * n)))
-    # rank-based hard selection
-    thresh = flat.kthvalue(n - k + 1, dim=1, keepdim=True).values  # [B,1]
+    # rank-based hard selection. topk is ONNX-exportable (kthvalue is not on many
+    # opsets); the k-th largest value is the smallest of the top-k.
+    thresh = flat.topk(k, dim=1).values[:, -1:]   # [B,1]
     hard = (flat >= thresh).to(prob.dtype)
     if tau is not None:
         hard = torch.maximum(hard, (flat > tau).to(prob.dtype))
@@ -154,7 +155,12 @@ class SparseFeatFusion(nn.Module):
         mask_s8 = _straight_through_topk_mask(prob, self.keep_ratio, self.tau)
         mask_s4 = F.interpolate(mask_s8, size=d.shape[-2:], mode='nearest')
 
-        if (not self.training) and self.sparse_infer:
+        # The gathered fast-path uses data-dependent control flow (per-image
+        # windows) that JIT/ONNX tracing cannot capture, so it is used only in
+        # eager eval. During tracing (and training) we run the dense masked
+        # composite, which is numerically equivalent and fully static.
+        use_sparse = (not self.training) and self.sparse_infer and not torch.jit.is_tracing()
+        if use_sparse:
             refined = self._sparse_refine(x0, mask_s4)
         else:
             # dense + mask composite: heavy blocks contribute only on kept cells
@@ -182,8 +188,11 @@ class SparseFeatFusion(nn.Module):
             y0, y1 = int(ys.min()), int(ys.max()) + 1
             x0b, x1b = int(xs.min()), int(xs.max()) + 1
             crop = x0[b:b + 1, :, y0:y1, x0b:x1b]
-            r = self.blocks(crop)
             mcrop = mask_s4[b:b + 1, :, y0:y1, x0b:x1b]
+            # Zero inactive cells BEFORE blocks so the sparse fast-path is
+            # numerically identical to the dense composite (blocks(x0*mask)),
+            # including the 7x7 conv behaviour at drop boundaries.
+            r = self.blocks(crop * mcrop)
             out[b:b + 1, :, y0:y1, x0b:x1b] = mcrop * r + (1.0 - mcrop) * crop
         return out
 

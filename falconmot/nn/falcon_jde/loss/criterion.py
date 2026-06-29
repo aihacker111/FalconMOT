@@ -118,7 +118,10 @@ class FalconJDECriterion(nn.Module):
         # ----- Fovea-MOT additions -----
         use_siwbd:           bool  = False,   # SI-WBD box loss (small-object friendly)
         siwbd_C:             float = 0.5,     # area-normalisation spread
-        siwbd_replaces_giou: bool  = False,   # True: drop GIoU, use SI-WBD only
+        siwbd_replaces_giou: bool  = False,   # DEPRECATED alias -> box_reg_mode='replace'
+        box_reg_mode:        str   = None,    # 'add' | 'replace' | 'blend' (overlap-reg term)
+        siwbd_beta:          float = 1.0,     # blend: size-gate sharpness (dimensionless)
+        siwbd_logstd_floor:  float = 0.5,     # blend: min log-area std (anti-degenerate)
         use_tucl:            bool  = False,    # uncertainty-weighted ReID (T-UCL)
         tucl_lambda:         float = 0.05,    # weight of the -log(w) regulariser
         use_entropy_aux:     bool  = False,   # supervise the SAFA entropy scorer
@@ -143,6 +146,15 @@ class FalconJDECriterion(nn.Module):
         self.use_siwbd           = use_siwbd
         self.siwbd_C             = siwbd_C
         self.siwbd_replaces_giou = siwbd_replaces_giou
+        # Resolve the overlap-regression mode. Back-compat: if box_reg_mode is not
+        # given, derive it from the old siwbd_replaces_giou flag.
+        if box_reg_mode is None:
+            box_reg_mode = 'replace' if siwbd_replaces_giou else 'add'
+        assert box_reg_mode in ('add', 'replace', 'blend'), \
+            f"box_reg_mode must be add|replace|blend, got {box_reg_mode}"
+        self.box_reg_mode        = box_reg_mode
+        self.siwbd_beta          = siwbd_beta
+        self.siwbd_logstd_floor  = siwbd_logstd_floor
         self.use_tucl            = use_tucl
         self.tucl_lambda         = tucl_lambda
         self.use_entropy_aux     = use_entropy_aux
@@ -223,22 +235,52 @@ class FalconJDECriterion(nn.Module):
         src_boxes = outputs['pred_boxes'][idx]
         tgt_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
         loss_bbox = F.l1_loss(src_boxes, tgt_boxes, reduction='none')
-        loss_giou = 1 - torch.diag(generalized_box_iou(
-            box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(tgt_boxes)))
-        if boxes_weight is not None:
-            loss_giou = loss_giou * boxes_weight
         out = {'loss_bbox': loss_bbox.sum() / num_boxes}
 
-        if self.use_siwbd:
-            # SI-WBD: scale-invariant, smooth gradient for tiny boxes.
-            l_siwbd = si_wbd_loss(src_boxes, tgt_boxes, C=self.siwbd_C)
+        # per-box overlap loss (GIoU)
+        giou = 1 - torch.diag(generalized_box_iou(
+            box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(tgt_boxes)))   # [N]
+
+        # No SI-WBD -> plain GIoU in the overlap slot (original behaviour).
+        if not self.use_siwbd:
             if boxes_weight is not None:
-                l_siwbd = l_siwbd * boxes_weight
-            out['loss_siwbd'] = l_siwbd.sum() / num_boxes
-            if not self.siwbd_replaces_giou:
-                out['loss_giou'] = loss_giou.sum() / num_boxes
-        else:
-            out['loss_giou'] = loss_giou.sum() / num_boxes
+                giou = giou * boxes_weight
+            out['loss_giou'] = giou.sum() / num_boxes
+            return out
+
+        siwbd = si_wbd_loss(src_boxes, tgt_boxes, C=self.siwbd_C)            # [N]
+        mode = self.box_reg_mode
+
+        if mode == 'add':
+            # GIoU + SI-WBD as two separate signals (loss_siwbd has its own weight).
+            if boxes_weight is not None:
+                giou = giou * boxes_weight
+                siwbd = siwbd * boxes_weight
+            out['loss_giou'] = giou.sum() / num_boxes
+            out['loss_siwbd'] = siwbd.sum() / num_boxes
+
+        elif mode == 'replace':
+            # SI-WBD fills the single overlap slot (reuses loss_giou weight 2.0).
+            if boxes_weight is not None:
+                siwbd = siwbd * boxes_weight
+            out['loss_giou'] = siwbd.sum() / num_boxes
+
+        else:  # blend
+            # Size-gated convex blend: small objects -> SI-WBD, large -> GIoU.
+            # The gate self-tunes in log-area space: split at the batch's own median
+            # object size, sharpness scales with its size spread. No fixed threshold;
+            # adapts per dataset / resolution. area_gt detached (targets carry no grad).
+            area = (tgt_boxes[:, 2].clamp(min=0) * tgt_boxes[:, 3].clamp(min=0)).detach()
+            la = torch.log(area.clamp(min=1e-8))
+            center = la.median()
+            scale = la.std() if la.numel() > 1 else torch.as_tensor(float('nan'), device=la.device)
+            if not torch.isfinite(scale) or scale < self.siwbd_logstd_floor:
+                scale = torch.as_tensor(self.siwbd_logstd_floor, device=la.device)
+            lam = torch.sigmoid((center - la) / (self.siwbd_beta * scale))
+            reg = (1.0 - lam) * giou + lam * siwbd                          # single signal
+            if boxes_weight is not None:
+                reg = reg * boxes_weight
+            out['loss_giou'] = reg.sum() / num_boxes
         return out
 
     @staticmethod
