@@ -104,16 +104,106 @@ def _straight_through_topk_mask(prob: torch.Tensor, keep_ratio: float,
     return hard + (soft - soft.detach())
 
 
+# class SparseFeatFusion(nn.Module):
+#     """Entropy-gated stride-4 fusion (the GFLOPs-saving core of SAFA).
+
+#     Cheap paths (detail 1x1, semantic 1x1, gate) run densely. The heavy
+#     ConvNeXtV2 refinement only contributes on kept (high-entropy) cells; dropped
+#     cells keep the cheap detail feature. Set `keep_ratio` to control the
+#     compute/accuracy trade-off (e.g. 0.25 -> heavy compute on ~25% of S4 cells).
+
+#     Drop-in compatible with FeatFusion.forward(c1, s8) and additionally returns
+#     the entropy logit so the criterion can supervise it.
+#     """
+
+#     def __init__(self, c1_ch: int, hidden_dim: int, mid_dim: Optional[int] = None,
+#                  n_blocks: int = 2, expand: float = 2.0, scorer_in_ch: Optional[int] = None,
+#                  keep_ratio: float = 0.25, tau: Optional[float] = None,
+#                  sparse_infer: bool = True):
+#         super().__init__()
+#         mid = mid_dim or hidden_dim // 2
+#         self.keep_ratio = float(keep_ratio)
+#         self.tau = tau
+#         self.sparse_infer = bool(sparse_infer)
+
+#         # cheap projections (same as FeatFusion)
+#         self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)
+#         self.sem = nn.Conv2d(hidden_dim, mid, 1, bias=False)
+#         self.gate_spatial = nn.Sequential(
+#             nn.Conv2d(mid, mid, 3, padding=1, groups=mid, bias=True), nn.Sigmoid())
+#         self.alpha = nn.Parameter(torch.tensor(1.0))
+
+#         # heavy refinement (only meaningfully active on kept cells)
+#         self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand, k=7) for _ in range(n_blocks)])
+#         self.out = nn.Conv2d(mid, hidden_dim, 1, bias=False)
+#         self.out_norm = LayerNorm2d(hidden_dim)
+
+#         # entropy scorer on S8 (defaults to S8 == hidden_dim channels)
+#         self.scorer = EntropyScorer(scorer_in_ch or hidden_dim)
+
+#     def forward(self, c1: torch.Tensor, s8: torch.Tensor,
+#                 return_mask: bool = False):
+#         d = self.detail(c1)                                   # [B,mid,H4,W4] cheap
+#         s = self.sem(s8)
+#         s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False)
+#         g = self.gate_spatial(s)
+#         x0 = d + self.alpha * (g * s)                         # cheap fused base
+
+#         # entropy map (S8) -> keep mask (S4)
+#         ent_logit = self.scorer(s8)                           # [B,1,H8,W8]
+#         prob = ent_logit.sigmoid()
+#         mask_s8 = _straight_through_topk_mask(prob, self.keep_ratio, self.tau)
+#         mask_s4 = F.interpolate(mask_s8, size=d.shape[-2:], mode='nearest')
+
+#         # The gathered fast-path uses data-dependent control flow (per-image
+#         # windows) that JIT/ONNX tracing cannot capture, so it is used only in
+#         # eager eval. During tracing (and training) we run the dense masked
+#         # composite, which is numerically equivalent and fully static.
+#         use_sparse = (not self.training) and self.sparse_infer and not torch.jit.is_tracing()
+#         if use_sparse:
+#             refined = self._sparse_refine(x0, mask_s4)
+#         else:
+#             # dense + mask composite: heavy blocks contribute only on kept cells
+#             refined = self.blocks(x0 * mask_s4)
+#             refined = mask_s4 * refined + (1.0 - mask_s4) * x0
+
+#         out = self.out_norm(self.out(refined))
+#         if return_mask:
+#             return out, ent_logit, mask_s4
+#         return out, ent_logit
+
+#     @torch.no_grad()
+#     def _sparse_refine(self, x0: torch.Tensor, mask_s4: torch.Tensor) -> torch.Tensor:
+#         """Inference fast-path: run heavy blocks only on the tight active window
+#         per image. This is what realises the reported GFLOPs reduction. Falls
+#         back to the dense composite if a frame has no/all active cells.
+#         """
+#         B = x0.shape[0]
+#         out = x0.clone()
+#         for b in range(B):
+#             m = mask_s4[b, 0] > 0.5
+#             if m.sum() == 0:
+#                 continue
+#             ys, xs = torch.where(m)
+#             y0, y1 = int(ys.min()), int(ys.max()) + 1
+#             x0b, x1b = int(xs.min()), int(xs.max()) + 1
+#             crop = x0[b:b + 1, :, y0:y1, x0b:x1b]
+#             mcrop = mask_s4[b:b + 1, :, y0:y1, x0b:x1b]
+#             # Zero inactive cells BEFORE blocks so the sparse fast-path is
+#             # numerically identical to the dense composite (blocks(x0*mask)),
+#             # including the 7x7 conv behaviour at drop boundaries.
+#             r = self.blocks(crop * mcrop)
+#             out[b:b + 1, :, y0:y1, x0b:x1b] = mcrop * r + (1.0 - mcrop) * crop
+#         return out
+
+
 class SparseFeatFusion(nn.Module):
-    """Entropy-gated stride-4 fusion (the GFLOPs-saving core of SAFA).
-
-    Cheap paths (detail 1x1, semantic 1x1, gate) run densely. The heavy
-    ConvNeXtV2 refinement only contributes on kept (high-entropy) cells; dropped
-    cells keep the cheap detail feature. Set `keep_ratio` to control the
-    compute/accuracy trade-off (e.g. 0.25 -> heavy compute on ~25% of S4 cells).
-
-    Drop-in compatible with FeatFusion.forward(c1, s8) and additionally returns
-    the entropy logit so the criterion can supervise it.
+    """
+    Entropy-gated stride-4 fusion with Unified Bottleneck DFM.
+    
+    Áp dụng kỹ thuật Cổ chai (Bottleneck): Ép số channel xuống 4 lần 
+    trước khi phóng to ảnh lên 4 lần diện tích (Zoom x2).
+    GFLOPs được bù trừ hoàn hảo (Net cost = 0), thân thiện với ONNX.
     """
 
     def __init__(self, c1_ch: int, hidden_dim: int, mid_dim: Optional[int] = None,
@@ -124,78 +214,79 @@ class SparseFeatFusion(nn.Module):
         mid = mid_dim or hidden_dim // 2
         self.keep_ratio = float(keep_ratio)
         self.tau = tau
-        self.sparse_infer = bool(sparse_infer)
-
-        # cheap projections (same as FeatFusion)
+        
         self.detail = nn.Conv2d(c1_ch, mid, 1, bias=False)
         self.sem = nn.Conv2d(hidden_dim, mid, 1, bias=False)
         self.gate_spatial = nn.Sequential(
             nn.Conv2d(mid, mid, 3, padding=1, groups=mid, bias=True), nn.Sigmoid())
         self.alpha = nn.Parameter(torch.tensor(1.0))
 
-        # heavy refinement (only meaningfully active on kept cells)
-        self.blocks = nn.Sequential(*[ConvNeXtV2Block(mid, expand, k=7) for _ in range(n_blocks)])
+        # ==========================================================
+        # [THÊM MỚI]: BỘ NÉN CỔ CHAI (BOTTLENECK) ĐỂ CỨU GFLOPs
+        # ==========================================================
+        zoom_dim = max(16, mid // 4) # Ép channel xuống 4 lần (VD: 128 -> 32)
+        
+        self.compress = nn.Conv2d(mid, zoom_dim, 1, bias=False) # Nén
+        
+        # Khối ConvNeXtV2 giờ chỉ chạy trên số lượng channel cực nhỏ
+        self.blocks = nn.Sequential(*[ConvNeXtV2Block(zoom_dim, expand, k=7) for _ in range(n_blocks)])
+        
+        self.expand_conv = nn.Conv2d(zoom_dim, mid, 1, bias=False) # Bung ra lại
+        # ==========================================================
+
         self.out = nn.Conv2d(mid, hidden_dim, 1, bias=False)
         self.out_norm = LayerNorm2d(hidden_dim)
 
-        # entropy scorer on S8 (defaults to S8 == hidden_dim channels)
         self.scorer = EntropyScorer(scorer_in_ch or hidden_dim)
 
     def forward(self, c1: torch.Tensor, s8: torch.Tensor,
                 return_mask: bool = False):
-        d = self.detail(c1)                                   # [B,mid,H4,W4] cheap
+        d = self.detail(c1)                                   
         s = self.sem(s8)
         s = F.interpolate(s, size=d.shape[-2:], mode='bilinear', align_corners=False)
         g = self.gate_spatial(s)
-        x0 = d + self.alpha * (g * s)                         # cheap fused base
+        x0 = d + self.alpha * (g * s)                         
 
-        # entropy map (S8) -> keep mask (S4)
-        ent_logit = self.scorer(s8)                           # [B,1,H8,W8]
+        ent_logit = self.scorer(s8)                           
         prob = ent_logit.sigmoid()
         mask_s8 = _straight_through_topk_mask(prob, self.keep_ratio, self.tau)
         mask_s4 = F.interpolate(mask_s8, size=d.shape[-2:], mode='nearest')
 
-        # The gathered fast-path uses data-dependent control flow (per-image
-        # windows) that JIT/ONNX tracing cannot capture, so it is used only in
-        # eager eval. During tracing (and training) we run the dense masked
-        # composite, which is numerically equivalent and fully static.
-        use_sparse = (not self.training) and self.sparse_infer and not torch.jit.is_tracing()
-        if use_sparse:
-            refined = self._sparse_refine(x0, mask_s4)
-        else:
-            # dense + mask composite: heavy blocks contribute only on kept cells
-            refined = self.blocks(x0 * mask_s4)
-            refined = mask_s4 * refined + (1.0 - mask_s4) * x0
+        # =====================================================================
+        # UNIFIED DYNAMIC FOVEAL MAGNIFICATION (BOTTLENECK DFM)
+        # =====================================================================
+        zoom_scale = 2.0
+        
+        # 1. Nén Channel: Giảm 4 lần khối lượng tính toán
+        x0_compressed = self.compress(x0)
+        
+        # 2. Phóng to ảnh (Zoom in): Tăng 4 lần khối lượng tính toán (Bù trừ = 0)
+        x0_zoomed = F.interpolate(x0_compressed, scale_factor=zoom_scale, mode='bilinear', align_corners=False)
+        mask_zoomed = F.interpolate(mask_s4, scale_factor=zoom_scale, mode='nearest')
+        
+        # 3. Học chi tiết nhỏ trên ảnh đã Zoom (GFLOPs siêu thấp vì channel rất nhỏ)
+        refined_zoomed = self.blocks(x0_zoomed * mask_zoomed)
+        zoomed_res = mask_zoomed * refined_zoomed + (1.0 - mask_zoomed) * x0_zoomed
+        
+        # 4. Thu nhỏ ảnh (Zoom out)
+        refined_compressed = F.interpolate(
+            zoomed_res,
+            scale_factor=1.0 / zoom_scale,        # 0.5 -> trùng khớp với zoom_scale=2.0
+            mode='bilinear',
+            align_corners=False,
+            recompute_scale_factor=False,         # QUAN TRỌNG: giữ scales tĩnh, không tính size từ shape
+        )
+        
+        # 5. Phục hồi Channel
+        refined = self.expand_conv(refined_compressed)
+        # =====================================================================
 
-        out = self.out_norm(self.out(refined))
+        # Cộng Residual để tránh mất mát thông tin nền (Skip Connection)
+        out = self.out_norm(self.out(x0 + refined))
+        
         if return_mask:
             return out, ent_logit, mask_s4
         return out, ent_logit
-
-    @torch.no_grad()
-    def _sparse_refine(self, x0: torch.Tensor, mask_s4: torch.Tensor) -> torch.Tensor:
-        """Inference fast-path: run heavy blocks only on the tight active window
-        per image. This is what realises the reported GFLOPs reduction. Falls
-        back to the dense composite if a frame has no/all active cells.
-        """
-        B = x0.shape[0]
-        out = x0.clone()
-        for b in range(B):
-            m = mask_s4[b, 0] > 0.5
-            if m.sum() == 0:
-                continue
-            ys, xs = torch.where(m)
-            y0, y1 = int(ys.min()), int(ys.max()) + 1
-            x0b, x1b = int(xs.min()), int(xs.max()) + 1
-            crop = x0[b:b + 1, :, y0:y1, x0b:x1b]
-            mcrop = mask_s4[b:b + 1, :, y0:y1, x0b:x1b]
-            # Zero inactive cells BEFORE blocks so the sparse fast-path is
-            # numerically identical to the dense composite (blocks(x0*mask)),
-            # including the 7x7 conv behaviour at drop boundaries.
-            r = self.blocks(crop * mcrop)
-            out[b:b + 1, :, y0:y1, x0b:x1b] = mcrop * r + (1.0 - mcrop) * crop
-        return out
-
 
 # =====================================================================
 # (3) SCALE-ADAPTIVE LEVEL ROUTING FOR DEFORMABLE ATTENTION
