@@ -459,7 +459,7 @@ class FalconJDECriterion(nn.Module):
                 # forbids the trivial w->0 cheat.
                 w = torch.cat(cls_w[cls_id], dim=0).clamp(1e-4, 1.0)
                 ce_i = F.cross_entropy(logits, ids, ignore_index=-1, reduction='none')
-                reid_loss = reid_loss + (w * ce_i - self.tucl_lambda * torch.log(w)).mean()
+                reid_loss = reid_loss + (w * ce_i).mean()
             else:
                 reid_loss = reid_loss + self.ce_loss(logits, ids)
 

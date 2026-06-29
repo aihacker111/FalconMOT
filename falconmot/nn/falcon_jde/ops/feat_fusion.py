@@ -210,27 +210,89 @@ def _draw_gaussian(hmap: torch.Tensor, cx: int, cy: int, radius: int):
     torch.maximum(masked_h, masked_g, out=masked_h)
 
 
+# @torch.no_grad()
+# def build_center_heatmaps(targets, H: int, W: int, device,
+#                           min_overlap: float = 0.7):
+#     """Generate the target Gaussian heatmap for the whole batch.
+#     targets[b]['boxes'] : [Ni,4] cxcywh normalized to [0,1].
+#     Returns [B,1,H,W]. (Tip: move this into the dataloader/collate to take it off
+#     the GPU path -> even faster.)
+#     """
+#     B = len(targets)
+#     hm = torch.zeros((B, 1, H, W), device=device)
+#     for b in range(B):
+#         boxes = targets[b]['boxes']
+#         if boxes.numel() == 0:
+#             continue
+#         cx = (boxes[:, 0] * W).clamp(0, W - 1)
+#         cy = (boxes[:, 1] * H).clamp(0, H - 1)
+#         bw = (boxes[:, 2] * W).clamp(min=1)
+#         bh = (boxes[:, 3] * H).clamp(min=1)
+#         for i in range(boxes.shape[0]):
+#             r = _gaussian_radius(float(bh[i]), float(bw[i]), min_overlap)
+#             _draw_gaussian(hm[b, 0], int(cx[i]), int(cy[i]), r)
+#     return hm
+
+
+
 @torch.no_grad()
-def build_center_heatmaps(targets, H: int, W: int, device,
-                          min_overlap: float = 0.7):
-    """Generate the target Gaussian heatmap for the whole batch.
-    targets[b]['boxes'] : [Ni,4] cxcywh normalized to [0,1].
-    Returns [B,1,H,W]. (Tip: move this into the dataloader/collate to take it off
-    the GPU path -> even faster.)
+def build_center_heatmaps(targets, H: int, W: int, device, min_overlap: float = 0.7):
+    """
+    [FIXED] Fully Vectorized GPU Heatmap Generation.
+    Eliminates inner loops for blazing fast training.
     """
     B = len(targets)
     hm = torch.zeros((B, 1, H, W), device=device)
+    
+    # Pre-compute grid once
+    y = torch.arange(H, device=device, dtype=torch.float32)
+    x = torch.arange(W, device=device, dtype=torch.float32)
+    yy, xx = torch.meshgrid(y, x, indexing='ij')
+
     for b in range(B):
         boxes = targets[b]['boxes']
         if boxes.numel() == 0:
             continue
-        cx = (boxes[:, 0] * W).clamp(0, W - 1)
-        cy = (boxes[:, 1] * H).clamp(0, H - 1)
+            
+        cx = (boxes[:, 0] * W)
+        cy = (boxes[:, 1] * H)
         bw = (boxes[:, 2] * W).clamp(min=1)
         bh = (boxes[:, 3] * H).clamp(min=1)
-        for i in range(boxes.shape[0]):
-            r = _gaussian_radius(float(bh[i]), float(bw[i]), min_overlap)
-            _draw_gaussian(hm[b, 0], int(cx[i]), int(cy[i]), r)
+
+        # Vectorized Radius Calculation for all boxes in the image
+        a1 = 1.0
+        b1 = bh + bw
+        c1 = bw * bh * (1 - min_overlap) / (1 + min_overlap)
+        sq1 = torch.sqrt(torch.clamp(b1*b1 - 4*a1*c1, min=0))
+        r1 = (b1 - sq1) / 2
+
+        a2 = 4.0
+        b2 = 2 * (bh + bw)
+        c2 = (1 - min_overlap) * bw * bh
+        sq2 = torch.sqrt(torch.clamp(b2*b2 - 4*a2*c2, min=0))
+        r2 = (b2 - sq2) / 2
+
+        a3 = 4 * min_overlap
+        b3 = -2 * min_overlap * (bh + bw)
+        c3 = (min_overlap - 1) * bw * bh
+        sq3 = torch.sqrt(torch.clamp(b3*b3 - 4*a3*c3, min=0))
+        r3 = (b3 + sq3) / 2
+
+        r = torch.min(torch.stack([r1, r2, r3], dim=0), dim=0).values
+        r = torch.clamp(r, min=1.0)
+        sigma = (2 * r + 1) / 6.0
+
+        # Vectorized Gaussian Splatting
+        # Calculate distance from all grid points to all centers
+        # dist shape: [N_boxes, H, W]
+        dist = (xx.unsqueeze(0) - cx.unsqueeze(-1).unsqueeze(-1))**2 + \
+               (yy.unsqueeze(0) - cy.unsqueeze(-1).unsqueeze(-1))**2
+               
+        gaussians = torch.exp(-dist / (2 * sigma.unsqueeze(-1).unsqueeze(-1)**2))
+        
+        # Max over all objects to handle overlapping objects correctly
+        hm[b, 0] = torch.max(gaussians, dim=0).values
+        
     return hm
 
 
