@@ -162,6 +162,13 @@ Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 Modules to compute the matching cost and solve the corresponding LSAP.
 
 Copyright (c) 2024 The D-FINE Authors All Rights Reserved.
+
+[MODIFIED] Matcher gờ hỗ trợ SI-WBD trong matching cost, NHẤT QUÁN với criterion:
+  - box_reg_mode='replace' : overlap = SI-WBD (bỏ GIoU)
+  - box_reg_mode='add'     : overlap = GIoU + SI-WBD (hai tín hiệu cộng riêng)
+  - box_reg_mode='blend'   : overlap = size-gated (1-λ)·GIoU + λ·SI-WBD
+                             (mặc định; vật nhỏ -> SI-WBD, vật lớn -> GIoU)
+Không còn zero GIoU một cách cứng nhắc -> matcher và loss nói cùng một ngôn ngữ.
 """
 
 import torch
@@ -172,7 +179,7 @@ from scipy.optimize import linear_sum_assignment
 from typing import Dict
 
 from ..ops.box_ops import box_cxcywh_to_xyxy, generalized_box_iou, box_iou
-from .siwbd import gaussian_w2_sq  # [FIXED] Import hàm tính Wasserstein Distance
+from .siwbd import gaussian_w2_sq  # hàm tính 2-Wasserstein^2 closed-form
 import numpy as np
 
 
@@ -180,31 +187,85 @@ class HungarianMatcher(nn.Module):
     __share__ = ['use_focal_loss', ]
 
     def __init__(self, weight_dict, use_focal_loss=False, alpha=0.25, gamma=2.0,
-                change_matcher=False, iou_order_alpha=1.0, matcher_change_epoch=10000):
+                 change_matcher=False, iou_order_alpha=1.0, matcher_change_epoch=10000):
         super().__init__()
         self.cost_class = weight_dict.get('cost_class', 1.0)
-        self.cost_bbox = weight_dict.get('cost_bbox', 5.0)
-        
-        # [FIXED] Thêm logic xử lý SI-WBD
-        self.use_siwbd = weight_dict.get('use_siwbd', False)
-        self.siwbd_C = weight_dict.get('siwbd_C', 0.5)
-        
-        if self.use_siwbd:
-            self.cost_siwbd = weight_dict.get('cost_siwbd', 2.0)
-            self.cost_giou = 0.0
-        else:
-            self.cost_giou = weight_dict.get('cost_giou', 2.0)
-            self.cost_siwbd = 0.0
+        self.cost_bbox  = weight_dict.get('cost_bbox', 5.0)
 
-        self.change_matcher = change_matcher
-        self.iou_order_alpha = iou_order_alpha
+        # ----- SI-WBD config (đọc từ weight_dict; mặc định an toàn) -----
+        self.use_siwbd = weight_dict.get('use_siwbd', False)
+        self.siwbd_C   = weight_dict.get('siwbd_C', 0.5)
+
+        # [MODIFIED] Luôn giữ cost_giou (không zero nữa). Khi không dùng SI-WBD
+        # thì cost_siwbd đơn giản là không được tham chiếu.
+        self.cost_giou  = weight_dict.get('cost_giou', 2.0)
+        self.cost_siwbd = weight_dict.get('cost_siwbd', 2.0)
+
+        # [NEW] Chế độ trộn overlap, mirror đúng criterion.box_reg_mode.
+        self.box_reg_mode = weight_dict.get('box_reg_mode', 'blend')
+        assert self.box_reg_mode in ('add', 'replace', 'blend'), \
+            f"box_reg_mode must be add|replace|blend, got {self.box_reg_mode}"
+
+        # [NEW] Tham số size-gate cho blend (mirror criterion).
+        self.siwbd_beta         = weight_dict.get('siwbd_beta', 1.0)
+        self.siwbd_logstd_floor = weight_dict.get('siwbd_logstd_floor', 0.5)
+
+        self.change_matcher       = change_matcher
+        self.iou_order_alpha      = iou_order_alpha
         self.matcher_change_epoch = matcher_change_epoch
         if self.change_matcher:
-            print(f"Using the new matching cost with iou_order_alpha = {iou_order_alpha} at epoch {matcher_change_epoch}")
+            print(f"Using the new matching cost with iou_order_alpha = "
+                  f"{iou_order_alpha} at epoch {matcher_change_epoch}")
+        if self.use_siwbd:
+            print(f"[Matcher] SI-WBD ON | mode={self.box_reg_mode} | "
+                  f"C={self.siwbd_C} cost_siwbd={self.cost_siwbd} cost_giou={self.cost_giou}")
 
         self.use_focal_loss = use_focal_loss
         self.alpha = alpha
         self.gamma = gamma
+
+    # -----------------------------------------------------------------
+    # [NEW] Overlap cost dùng chung cho 3 mode. Mọi ma trận đều quy ước
+    #       "thấp hơn = khớp tốt hơn" (dạng distance), để blend với SI-WBD
+    #       cùng thang đo (giống criterion: giou = 1 - GIoU, siwbd in (0,1)).
+    # -----------------------------------------------------------------
+    def _overlap_cost(self, out_bbox: torch.Tensor, tgt_bbox: torch.Tensor) -> torch.Tensor:
+        # GIoU ở dạng distance: 1 - GIoU  -> [N_q, N_gt], thấp = chồng tốt
+        giou_cost = 1.0 - generalized_box_iou(
+            box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+
+        # SI-WBD cost: 1 - exp(-W2^2 / (C * area_t)) -> (0,1), thấp = gần
+        w2_sq  = gaussian_w2_sq(out_bbox.unsqueeze(1), tgt_bbox.unsqueeze(0))   # [N_q, N_gt]
+        area_t = (tgt_bbox[:, 2].clamp(min=0) * tgt_bbox[:, 3].clamp(min=0)).unsqueeze(0)
+        norm   = self.siwbd_C * area_t + 1e-7
+        siwbd_cost = 1.0 - torch.exp(-w2_sq / norm)                              # [N_q, N_gt]
+
+        if self.box_reg_mode == 'replace':
+            # Chỉ SI-WBD gánh slot overlap.
+            return self.cost_siwbd * siwbd_cost
+
+        if self.box_reg_mode == 'add':
+            # GIoU và SI-WBD là hai tín hiệu cộng riêng, mỗi cái một trọng số.
+            return self.cost_giou * giou_cost + self.cost_siwbd * siwbd_cost
+
+        # ----- blend: size-gated convex blend, gate theo GT (per-column) -----
+        # λ tự hiệu chỉnh trong không gian log-area: tách tại trung vị batch,
+        # độ sắc tỉ lệ với độ phân tán kích thước. Vật nhỏ -> λ→1 (SI-WBD).
+        area = (tgt_bbox[:, 2].clamp(min=0) * tgt_bbox[:, 3].clamp(min=0))       # [N_gt]
+        la   = torch.log(area.clamp(min=1e-8))                                   # [N_gt]
+        if la.numel() == 0:
+            lam = la                                                            # rỗng, an toàn
+        else:
+            center = la.median()
+            scale  = la.std() if la.numel() > 1 else torch.as_tensor(
+                float('nan'), device=la.device)
+            if (not torch.isfinite(scale)) or scale < self.siwbd_logstd_floor:
+                scale = torch.as_tensor(self.siwbd_logstd_floor, device=la.device)
+            lam = torch.sigmoid((center - la) / (self.siwbd_beta * scale))       # [N_gt]
+        overlap = (1.0 - lam)[None, :] * giou_cost + lam[None, :] * siwbd_cost   # [N_q, N_gt]
+        # Reuse trọng số cost_giou cho slot overlap đã trộn (mirror criterion,
+        # nơi blend được ghi vào loss_giou slot weight 2.0).
+        return self.cost_giou * overlap
 
     @torch.no_grad()
     def forward(self, outputs: Dict[str, torch.Tensor], targets, return_topk=False, epoch=0):
@@ -215,13 +276,15 @@ class HungarianMatcher(nn.Module):
         else:
             out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)
 
-        out_bbox = outputs["pred_boxes"].flatten(0, 1) 
+        out_bbox = outputs["pred_boxes"].flatten(0, 1)
 
-        tgt_ids = torch.cat([v["labels"] for v in targets])
+        tgt_ids  = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
         if self.change_matcher and epoch >= self.matcher_change_epoch:
-            class_score = out_prob[:, tgt_ids] 
+            # NOTE: nhánh này dùng IoU thuần -> "vực" IoU cho vật tí hon.
+            # Chỉ kích hoạt ở cuối training (matcher_change_epoch lớn).
+            class_score = out_prob[:, tgt_ids]
             bbox_iou, _ = box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
             C = (-1) * (class_score * torch.pow(bbox_iou, self.iou_order_alpha))
         else:
@@ -235,17 +298,13 @@ class HungarianMatcher(nn.Module):
 
             cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
-            # [FIXED] Phân luồng tính Cost Matrix dựa trên cấu hình
+            # [MODIFIED] Phân luồng overlap cost theo cấu hình.
             if self.use_siwbd:
-                # Tính SI-WBD Cost
-                w2_sq = gaussian_w2_sq(out_bbox.unsqueeze(1), tgt_bbox.unsqueeze(0)) # Broadcasting [N_q, N_gt]
-                area_t = (tgt_bbox[:, 2].clamp(min=0) * tgt_bbox[:, 3].clamp(min=0)).unsqueeze(0)
-                norm = self.siwbd_C * area_t + 1e-7
-                cost_siwbd_matrix = 1.0 - torch.exp(-w2_sq / norm)
-                C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_siwbd * cost_siwbd_matrix
+                overlap_cost = self._overlap_cost(out_bbox, tgt_bbox)
+                C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + overlap_cost
             else:
-                # Tính GIoU Cost truyền thống
-                cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
+                cost_giou = -generalized_box_iou(
+                    box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
                 C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
 
         C = C.view(bs, num_queries, -1).cpu()
@@ -253,17 +312,20 @@ class HungarianMatcher(nn.Module):
         sizes = [len(v["boxes"]) for v in targets]
         C = torch.nan_to_num(C, nan=1.0)
         indices_pre = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-        indices = [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices_pre]
+        indices = [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
+                   for i, j in indices_pre]
 
         if return_topk:
-            return {'indices_o2m': self.get_top_k_matches(C, sizes=sizes, k=return_topk, initial_indices=indices_pre)}
+            return {'indices_o2m': self.get_top_k_matches(
+                C, sizes=sizes, k=return_topk, initial_indices=indices_pre)}
 
         return {'indices': indices}
 
     def get_top_k_matches(self, C, sizes, k=1, initial_indices=None):
         indices_list = []
         for i in range(k):
-            indices_k = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))] if i > 0 else initial_indices
+            indices_k = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))] \
+                if i > 0 else initial_indices
             indices_list.append([
                 (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
                 for i, j in indices_k
@@ -272,5 +334,6 @@ class HungarianMatcher(nn.Module):
                 idx_k = np.stack(idx_k)
                 c[:, idx_k] = 1e6
         indices_list = [(torch.cat([indices_list[i][j][0] for i in range(k)], dim=0),
-                        torch.cat([indices_list[i][j][1] for i in range(k)], dim=0)) for j in range(len(sizes))]
+                         torch.cat([indices_list[i][j][1] for i in range(k)], dim=0))
+                        for j in range(len(sizes))]
         return indices_list

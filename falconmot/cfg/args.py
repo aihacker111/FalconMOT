@@ -186,7 +186,7 @@ class opts(object):
                                  help='quadratic LR warmup steps')
         self.parser.add_argument('--no_aug_epochs', type=int, default=2,
                                  help='final constant-LR epochs (no-aug phase)')
-        self.parser.add_argument('--lr_gamma', type=float, default=0.5,
+        self.parser.add_argument('--lr_gamma', type=float, default=0.1,
                                  help='min_lr = lr × lr_gamma (flat_cosine)')
         self.parser.add_argument('--lr_scheduler', type=str, default='flat_cosine',
                                  choices=['cosine', 'step', 'flat_cosine'])
