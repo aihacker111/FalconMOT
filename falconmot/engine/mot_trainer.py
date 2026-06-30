@@ -348,8 +348,12 @@ class MotTrainer(BaseTrainer):
                 _brm = 'replace'
             if _brm == 'add':
                 loss_states.append('loss_siwbd')
+        # if getattr(opt, 'use_safa', False) and getattr(opt, 'use_entropy_aux', True):
+        #     loss_states.append('loss_entropy')
         if getattr(opt, 'use_safa', False) and getattr(opt, 'use_entropy_aux', True):
             loss_states.append('loss_entropy')
+        if getattr(opt, 'use_tod', False) and getattr(opt, 'ortho_weight', 0.1) > 0:
+            loss_states.append('loss_ortho')
         criterion = _build_criterion(opt)
         return loss_states, criterion
  
