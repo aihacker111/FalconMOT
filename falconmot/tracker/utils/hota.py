@@ -142,17 +142,45 @@ class HOTACollector:
         v = res[key]
         return float(np.mean(v)) if hasattr(v, '__len__') else float(v)
 
-    def compute(self) -> dict:
-        """Return {'per_class': {cls: {...}}, 'overall': {...}} of HOTA scalars."""
+    def compute(self, num_workers: int = 0) -> dict:
+        """Return {'per_class': {cls: {...}}, 'overall': {...}} of HOTA scalars.
+
+        The dominant cost is TrackEval's ``eval_sequence`` (per-timestep Hungarian
+        matching + integration over 19 localisation thresholds), run once per
+        (class, sequence). It is pure numpy/scipy and releases the GIL during the
+        heavy linear-assignment and matrix ops, so ``num_workers > 0`` farms the
+        (class, seq) jobs out to a thread pool for a near-linear speedup with no
+        change to the results. ``num_workers=0`` keeps the original serial path.
+        """
         from trackeval.metrics import HOTA  # imported here so the dep is optional
         hota = HOTA()
+
+        # Flatten into independent (class, seq) jobs so they can run in parallel.
+        jobs = [(c, seq, sd)
+                for c in self.class_names
+                for seq, sd in self.store.get(c, {}).items()]
+
+        def _eval(job):
+            c, seq, sd = job
+            return c, seq, hota.eval_sequence(self._seq_data(sd))
+
+        if num_workers and len(jobs) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=num_workers) as ex:
+                evaluated = list(ex.map(_eval, jobs))
+        else:
+            evaluated = [_eval(j) for j in jobs]
+
+        # Regroup per class -> {seq: seq_result} for combine_sequences.
+        by_class: Dict[str, dict] = defaultdict(dict)
+        for c, seq, seq_res in evaluated:
+            by_class[c][seq] = seq_res
+
         per_class = {}
         for c in self.class_names:
-            seqs = self.store.get(c, {})
-            if not seqs:
+            seq_res = by_class.get(c, {})
+            if not seq_res:
                 continue
-            seq_res = {seq: hota.eval_sequence(self._seq_data(sd))
-                       for seq, sd in seqs.items()}
             cls_res = hota.combine_sequences(seq_res)
             per_class[c] = {
                 'HOTA': self._scalar(cls_res, 'HOTA'),
