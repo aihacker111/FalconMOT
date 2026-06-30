@@ -104,8 +104,8 @@ def _build_criterion(opt) -> FalconJDECriterion:
         siwbd_gate_momentum = getattr(opt, 'siwbd_gate_momentum', 0.99),
         use_tucl            = getattr(opt, 'use_tucl', False),
         tucl_lambda         = getattr(opt, 'tucl_lambda', 0.05),
-        tucl_detach_emb     = getattr(opt, 'tucl_detach_emb', True),
-        tucl_quality_prior  = getattr(opt, 'tucl_quality_prior', True),
+        # tucl_detach_emb     = getattr(opt, 'tucl_detach_emb', True),
+        # tucl_quality_prior  = getattr(opt, 'tucl_quality_prior', True),
         use_entropy_aux     = use_entropy_aux,
     )
  
