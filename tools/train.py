@@ -720,7 +720,6 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
         return {}
 
     model.eval()
-    opt.init()
     net_w, net_h = opt.img_size
     ncls     = opt.num_classes
     min_area = getattr(opt, 'min_box_area', 100)
@@ -878,7 +877,7 @@ def run(opt):
         dataset = Dataset(opt=opt, root=dataset_root,
                           paths=data_config['train'], img_size=opt.input_wh,
                           augment=True, transforms=T.Compose([T.ToTensor()]))
-
+    opt = opts().init()
     opt = opts().update_dataset_info_and_set_heads(opt, dataset)
     print("opt:\n", opt)
     logger = Logger(opt)
