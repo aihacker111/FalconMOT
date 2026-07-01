@@ -981,7 +981,7 @@ def run(opt):
         # Fallback (Phòng trường hợp bạn muốn train chung cả 2 cùng lúc)
         stage_mgr.apply_joint_training(model)
 
-    optimizer = build_optimizer(model, _with_lr(opt, init_lr))
+    optimizer = build_optimizer(model, _with_lr(opt, opt.lr))
 
     _nw = opt.num_workers
     train_loader = torch.utils.data.DataLoader(
