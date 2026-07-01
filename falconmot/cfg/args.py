@@ -554,9 +554,9 @@ class opts(object):
                                  help='STAGE 1: Detection-only training. No ReID head, '
                                       'no ReID loss. Save checkpoint, then run '
                                       'Stage-2 tracking fine-tune with --train_reid_only.')
-        self.parser.add_argument('--train_reid_only', action='store_true', default=False,
-                                 help='STAGE 2: ReID-only training. Freeze full Detection path, '
-                                      'train ONLY ReID head & Ortho Loss.')
+        self.parser.add_argument('--train_stage2_mot', action='store_true', default=False,
+                                 help='STAGE 2: MOT Fine-tuning. Freeze Backbone & Encoder, '
+                                      'train ONLY Decoder & ReID head.')
         self.parser.add_argument('--dataset',  default='coco',
                                  help='coco (COCO JSON format) — only supported format')
         self.parser.add_argument('--exp_id',   default='default')

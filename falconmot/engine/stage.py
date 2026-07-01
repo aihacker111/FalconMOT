@@ -302,6 +302,37 @@ def apply_joint_training(model):
         _set_module_trainable(_core(model).reid_head, True, 'reid_head')
     _report(model)
 
+
+def apply_stage2_mot(model):
+    """
+    STAGE 2 (MOT Fine-tuning): 
+    Freeze Backbone & Encoder (giữ nguyên feature extraction).
+    Train Decoder & ReID head (thích nghi với tracking queries).
+    """
+    print('[stage] === STAGE 2: Freeze Backbone/Encoder | Train Decoder + ReID ===')
+    m = _core(model)
+
+    # 1. Đóng băng Backbone & Encoder (bao gồm cả việc lock BatchNorm stats)
+    _set_module_trainable(m.backbone, False, 'backbone')
+    _set_module_trainable(m.encoder, False, 'encoder')
+
+    # Xử lý nhánh S4 (Stride-4): Vì nó đóng vai trò trích xuất đặc trưng độ phân giải cao 
+    # cho object nhỏ (giống Encoder), ta cũng nên freeze nó để tránh phá vỡ feature map.
+    if getattr(m, 'use_s4', False):
+        _set_module_trainable(m.s4_branch, False, 's4_branch')
+        if hasattr(m, 's4_aux_head'):
+            _set_module_trainable(m.s4_aux_head, False, 's4_aux_head')
+
+    # 2. Mở khóa Decoder để queries thích nghi với bài toán MOT
+    _set_module_trainable(m.decoder, True, 'decoder')
+
+    # 3. Mở khóa mạng ReID
+    if _has_reid_head(model):
+        _set_module_trainable(m.reid_head, True, 'reid_head')
+    else:
+        print('  [stage] WARNING: reid_head not found in model!')
+
+    _report(model)
 # ===========================================================================
 # OPTIMIZER / SCHEDULER UTILS
 # ===========================================================================

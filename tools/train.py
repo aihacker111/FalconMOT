@@ -1105,7 +1105,7 @@ def run(opt):
     # ── Training stage policy (Stage 1 vs Stage 2) ──────────────────────────
     # ========================================================================
     det_only  = getattr(opt, 'train_single_det', False)
-    reid_only = getattr(opt, 'train_reid_only', False)
+    reid_only = getattr(opt, 'train_stage2_mot', False)
 
     if det_only and reid_only:
         raise ValueError("Cannot set both --train_single_det and --train_reid_only!")
@@ -1115,7 +1115,7 @@ def run(opt):
         stage_mgr.apply_det_only(model)
     elif reid_only:
         # STAGE 2: Freeze Detection, Train ReID
-        stage_mgr.apply_reid_only(model)
+        stage_mgr.apply_stage2_mot(model)
     else:
         # Fallback / Joint Training
         stage_mgr.apply_joint_training(model)
