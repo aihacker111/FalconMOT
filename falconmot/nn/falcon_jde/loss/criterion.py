@@ -388,30 +388,145 @@ class FalconJDECriterion(nn.Module):
         s = F.grid_sample(emb_map_b.unsqueeze(0), grid, mode='bilinear', align_corners=False)
         return s.view(D, -1).t().contiguous()
 
+    # def loss_reid(self, outputs, targets, indices) -> dict:
+    #     """Per-class ReID: sparse CE(+Triplet) + dense alignment (if pred_reid_map is given)."""
+    #     if 'pred_reid' not in outputs:
+    #         return {}
+    #     am_tau = outputs['am_tau']
+    #     pred_reid = outputs['pred_reid']                       # (B,N,D) post-neck
+    #     pred_reid_raw = outputs.get('pred_reid_raw', pred_reid)  # (B,N,D) pre-neck
+    #     pred_reid_map = outputs.get('pred_reid_map', None)       # (B,D,H,W) | None
+    #     dev = pred_reid.device
+    #     reid_loss = pred_reid.sum() * 0.0
+
+    #     # T-UCL: per-query location/quality estimate w_i = sigmoid(LQE-refined score).
+    #     # High for sharp/large boxes, low for tiny/blurry ones. Detached: it gates
+    #     # the ReID gradient, it does not receive it.
+    #     quality_map = None
+    #     if self.use_tucl and 'pred_logits' in outputs:
+    #         quality_map = outputs['pred_logits'].sigmoid().amax(dim=-1).detach()  # (B,N)
+
+    #     cls_emb       = {c: [] for c in self.nid_dict}
+    #     cls_emb_raw   = {c: [] for c in self.nid_dict}
+    #     cls_emb_dense = {c: [] for c in self.nid_dict}
+    #     cls_emb_app   = {c: [] for c in self.nid_dict}          # NEW
+    #     cls_ids       = {c: [] for c in self.nid_dict}
+    #     cls_w         = {c: [] for c in self.nid_dict}          # T-UCL weights
+    #     pred_reid_app = outputs.get('pred_reid_app', None)
+
+    #     for b_idx, (src_idx, tgt_idx) in enumerate(indices):
+    #         if len(src_idx) == 0:
+    #             continue
+    #         t = targets[b_idx]
+    #         src_idx, tgt_idx = src_idx.to(dev), tgt_idx.to(dev)
+    #         labels = t['labels'].to(dev)[tgt_idx]
+    #         tids = t['track_ids'].to(dev)[tgt_idx]
+    #         valid = tids >= 0
+    #         if not valid.any():
+    #             continue
+
+    #         src_v = src_idx[valid]
+    #         emb_b = pred_reid[b_idx][src_v]
+    #         emb_b_r = pred_reid_raw[b_idx][src_v]
+    #         app_b = pred_reid_app[b_idx][src_v] if pred_reid_app is not None else None
+    #         lbl_b = labels[valid]
+    #         ids_b = tids[valid]
+    #         w_b = quality_map[b_idx][src_v] if quality_map is not None else None
+
+    #         dense_b = None
+    #         if pred_reid_map is not None:
+    #             centers = t['boxes'].to(dev)[tgt_idx][valid][:, :2]
+    #             dense_b = self._sample_emb_map(pred_reid_map[b_idx], centers)
+
+    #         for cls_id in self.nid_dict:
+    #             mask = (lbl_b == cls_id)
+    #             if not mask.any():
+    #                 continue
+    #             cls_emb[cls_id].append(emb_b[mask])
+    #             cls_emb_raw[cls_id].append(emb_b_r[mask])
+    #             if app_b is not None:                                  # NEW
+    #                 cls_emb_app[cls_id].append(app_b[mask])
+    #             cls_ids[cls_id].append(ids_b[mask])
+    #             if w_b is not None:
+    #                 cls_w[cls_id].append(w_b[mask])
+    #             if dense_b is not None:
+    #                 cls_emb_dense[cls_id].append(dense_b[mask])
+
+    #     n_active = 0
+    #     for cls_id in self.nid_dict:
+    #         if not cls_emb[cls_id]:
+    #             continue
+    #         emb = torch.cat(cls_emb[cls_id], dim=0)
+    #         emb_raw = torch.cat(cls_emb_raw[cls_id], dim=0)
+    #         ids = torch.cat(cls_ids[cls_id], dim=0)
+
+    #         # sparse classification
+    #         if self.use_arcface:
+    #             logits = self.classifiers[str(cls_id)](emb, ids)
+    #         else:
+    #             emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
+    #             logits = self.linear_classifiers[str(cls_id)](emb_id)
+    #         logits = logits / am_tau
+    #         if self.use_tucl and cls_w[cls_id]:
+    #             # T-UCL: down-weight unreliable (small/blurry) samples, with a
+    #             # -lambda*log(w) term (Kendall homoscedastic uncertainty) that
+    #             # forbids the trivial w->0 cheat.
+    #             w = torch.cat(cls_w[cls_id], dim=0).clamp(1e-4, 1.0)
+    #             ce_i = F.cross_entropy(logits, ids, ignore_index=-1, reduction='none')
+    #             reid_loss = reid_loss + (w * ce_i).mean()
+    #         else:
+    #             reid_loss = reid_loss + self.ce_loss(logits, ids)
+
+    #         # sparse triplet (pre-neck)
+    #         if self.use_triplet and emb_raw.shape[0] >= 2:
+    #             reid_loss = reid_loss + self.triplet(emb_raw, ids)
+
+    #         # dense CE + consistency with the sparse embedding
+    #         if cls_emb_dense[cls_id]:
+    #             dense = torch.cat(cls_emb_dense[cls_id], dim=0)
+    #             if self.use_arcface:
+    #                 logits_d = self.classifiers[str(cls_id)](dense, ids)
+    #             else:
+    #                 emb_id_d = self.emb_scale_dict[cls_id] * F.normalize(dense, dim=1)
+    #                 logits_d = self.linear_classifiers[str(cls_id)](emb_id_d)
+    #             logits_d = logits_d / am_tau
+    #             reid_loss = reid_loss + self.w_dense_ce * self.ce_loss(logits_d, ids)
+
+    #             if cls_emb_app[cls_id]:
+    #                 app_t = torch.cat(cls_emb_app[cls_id], dim=0)
+    #                 cons = 1.0 - (F.normalize(dense, dim=1)
+    #                               * F.normalize(app_t.detach(), dim=1)).sum(dim=1)
+    #                 reid_loss = reid_loss + self.w_cons * cons.mean()
+
+    #         n_active += 1
+
+    #     if n_active > 1:
+    #         reid_loss = reid_loss / n_active
+    #     return {'loss_reid': reid_loss}
     def loss_reid(self, outputs, targets, indices) -> dict:
-        """Per-class ReID: sparse CE(+Triplet) + dense alignment (if pred_reid_map is given)."""
+        """Per-class ReID: Pure CrossEntropy + Dense Alignment.
+        Uses Instance-balanced Loss and removes ArcFace/Triplet overhead.
+        """
         if 'pred_reid' not in outputs:
             return {}
         am_tau = outputs['am_tau']
         pred_reid = outputs['pred_reid']                       # (B,N,D) post-neck
-        pred_reid_raw = outputs.get('pred_reid_raw', pred_reid)  # (B,N,D) pre-neck
         pred_reid_map = outputs.get('pred_reid_map', None)       # (B,D,H,W) | None
         dev = pred_reid.device
+        
         reid_loss = pred_reid.sum() * 0.0
+        total_valid_instances = 0  # [CẢI TIẾN 2]: Tính tổng số instance để chia trung bình
 
         # T-UCL: per-query location/quality estimate w_i = sigmoid(LQE-refined score).
-        # High for sharp/large boxes, low for tiny/blurry ones. Detached: it gates
-        # the ReID gradient, it does not receive it.
         quality_map = None
         if self.use_tucl and 'pred_logits' in outputs:
             quality_map = outputs['pred_logits'].sigmoid().amax(dim=-1).detach()  # (B,N)
 
         cls_emb       = {c: [] for c in self.nid_dict}
-        cls_emb_raw   = {c: [] for c in self.nid_dict}
         cls_emb_dense = {c: [] for c in self.nid_dict}
-        cls_emb_app   = {c: [] for c in self.nid_dict}          # NEW
+        cls_emb_app   = {c: [] for c in self.nid_dict}
         cls_ids       = {c: [] for c in self.nid_dict}
-        cls_w         = {c: [] for c in self.nid_dict}          # T-UCL weights
+        cls_w         = {c: [] for c in self.nid_dict}
         pred_reid_app = outputs.get('pred_reid_app', None)
 
         for b_idx, (src_idx, tgt_idx) in enumerate(indices):
@@ -427,7 +542,6 @@ class FalconJDECriterion(nn.Module):
 
             src_v = src_idx[valid]
             emb_b = pred_reid[b_idx][src_v]
-            emb_b_r = pred_reid_raw[b_idx][src_v]
             app_b = pred_reid_app[b_idx][src_v] if pred_reid_app is not None else None
             lbl_b = labels[valid]
             ids_b = tids[valid]
@@ -443,8 +557,7 @@ class FalconJDECriterion(nn.Module):
                 if not mask.any():
                     continue
                 cls_emb[cls_id].append(emb_b[mask])
-                cls_emb_raw[cls_id].append(emb_b_r[mask])
-                if app_b is not None:                                  # NEW
+                if app_b is not None:
                     cls_emb_app[cls_id].append(app_b[mask])
                 cls_ids[cls_id].append(ids_b[mask])
                 if w_b is not None:
@@ -452,56 +565,53 @@ class FalconJDECriterion(nn.Module):
                 if dense_b is not None:
                     cls_emb_dense[cls_id].append(dense_b[mask])
 
-        n_active = 0
+        # Bắt đầu tính Loss
         for cls_id in self.nid_dict:
             if not cls_emb[cls_id]:
                 continue
+            
             emb = torch.cat(cls_emb[cls_id], dim=0)
-            emb_raw = torch.cat(cls_emb_raw[cls_id], dim=0)
             ids = torch.cat(cls_ids[cls_id], dim=0)
+            
+            num_instances = ids.size(0)
+            total_valid_instances += num_instances
 
-            # sparse classification
-            if self.use_arcface:
-                logits = self.classifiers[str(cls_id)](emb, ids)
-            else:
-                emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
-                logits = self.linear_classifiers[str(cls_id)](emb_id)
+            # Linear classification (FairMOT style)
+            emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
+            logits = self.linear_classifiers[str(cls_id)](emb_id)
             logits = logits / am_tau
+            
             if self.use_tucl and cls_w[cls_id]:
-                # T-UCL: down-weight unreliable (small/blurry) samples, with a
-                # -lambda*log(w) term (Kendall homoscedastic uncertainty) that
-                # forbids the trivial w->0 cheat.
+                # T-UCL: down-weight unreliable (small/blurry) samples
                 w = torch.cat(cls_w[cls_id], dim=0).clamp(1e-4, 1.0)
                 ce_i = F.cross_entropy(logits, ids, ignore_index=-1, reduction='none')
-                reid_loss = reid_loss + (w * ce_i).mean()
+                class_loss = (w * ce_i).sum() # Sum thay vì mean, để chia cho tổng instance ở cuối
             else:
-                reid_loss = reid_loss + self.ce_loss(logits, ids)
+                # [CẢI TIẾN 2]: Nhân với số lượng mẫu để bảo toàn trọng lượng
+                class_loss = self.ce_loss(logits, ids) * num_instances
+                
+            reid_loss = reid_loss + class_loss
 
-            # sparse triplet (pre-neck)
-            if self.use_triplet and emb_raw.shape[0] >= 2:
-                reid_loss = reid_loss + self.triplet(emb_raw, ids)
-
-            # dense CE + consistency with the sparse embedding
+            # Dense CE + consistency with the sparse embedding
             if cls_emb_dense[cls_id]:
                 dense = torch.cat(cls_emb_dense[cls_id], dim=0)
-                if self.use_arcface:
-                    logits_d = self.classifiers[str(cls_id)](dense, ids)
-                else:
-                    emb_id_d = self.emb_scale_dict[cls_id] * F.normalize(dense, dim=1)
-                    logits_d = self.linear_classifiers[str(cls_id)](emb_id_d)
+                emb_id_d = self.emb_scale_dict[cls_id] * F.normalize(dense, dim=1)
+                logits_d = self.linear_classifiers[str(cls_id)](emb_id_d)
                 logits_d = logits_d / am_tau
-                reid_loss = reid_loss + self.w_dense_ce * self.ce_loss(logits_d, ids)
+                
+                dense_loss = self.ce_loss(logits_d, ids) * num_instances
+                reid_loss = reid_loss + self.w_dense_ce * dense_loss
 
                 if cls_emb_app[cls_id]:
                     app_t = torch.cat(cls_emb_app[cls_id], dim=0)
-                    cons = 1.0 - (F.normalize(dense, dim=1)
-                                  * F.normalize(app_t.detach(), dim=1)).sum(dim=1)
-                    reid_loss = reid_loss + self.w_cons * cons.mean()
+                    cons = 1.0 - (F.normalize(dense, dim=1) * F.normalize(app_t.detach(), dim=1)).sum(dim=1)
+                    # Nhân với số lượng instance để balance
+                    reid_loss = reid_loss + self.w_cons * (cons.mean() * num_instances)
 
-            n_active += 1
-
-        if n_active > 1:
-            reid_loss = reid_loss / n_active
+        # [CẢI TIẾN 2]: Chia đều loss dựa trên tổng số Bounding Box có ID hợp lệ
+        if total_valid_instances > 0:
+            reid_loss = reid_loss / total_valid_instances
+            
         return {'loss_reid': reid_loss}
 
     def loss_s4_aux(self, outputs, targets, indices, num_boxes):
@@ -732,7 +842,8 @@ class FalconJDECriterion(nn.Module):
         det_loss = sum(v for k, v in losses.items() if k != 'loss_reid')
 
         if self.use_reid and self.id_weight > 0 and reid_loss is not None:
-            total = det_loss + self.id_weight * reid_loss
+            # total = det_loss + self.id_weight * reid_loss
+            total = reid_loss
         else:
             total = det_loss
 

@@ -80,12 +80,102 @@ class _ReIDResBlock(nn.Module):
         return x + self.pw(self.act(self.norm(self.dw(x))))
 
 
+# class DenseReIDHead(nn.Module):
+#     """Decoupled ReID head with a single shared field for QAM, exposing
+#     'emb_app' so the dense `cons` loss no longer conflicts with dense_ce."""
+#     def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
+#                  use_s4_dense=False, s4_in_ch=None,
+#                  tower_depth=2, query_gate_init=0.1, detach_input=True,
+#                  **kwargs):
+#         super().__init__()
+#         nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
+#         self.hidden_dim    = hidden_dim
+#         self.reid_dim      = reid_dim
+#         self.num_heads     = nh
+#         self.use_s4_dense  = bool(use_s4_dense and s4_in_ch is not None)
+#         self.detach_input  = bool(detach_input)
+
+#         # (2) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
+#         if self.use_s4_dense:
+#             self.s4_fuse = FeatFusion(s4_in_ch, hidden_dim, n_blocks=1)
+
+#         # (3) OWN tower: project to reid_dim, then tower_depth residual DW3x3 blocks.
+#         self.in_proj = nn.Sequential(
+#             nn.Conv2d(hidden_dim, reid_dim, kernel_size=1, bias=False),
+#             LayerNorm2d(reid_dim),
+#         )
+#         self.dense_tower = nn.Sequential(
+#             *[_ReIDResBlock(reid_dim) for _ in range(max(1, tower_depth))],
+#             LayerNorm2d(reid_dim),
+#         )
+
+#         # SPARSE PATH — the query only locates the sampling points.
+#         self.q_proj      = nn.Linear(hidden_dim, reid_dim)
+#         self.norm_q      = nn.LayerNorm(reid_dim)
+#         self.deform_attn = MSDeformableAttention(
+#             embed_dim=reid_dim, num_heads=nh,
+#             num_levels=1, num_points=num_points, method='default',
+#         )
+#         self.norm_attn   = nn.LayerNorm(reid_dim)
+
+#         # (4) emb content = appearance (dominant) + a gated residual from the query.
+#         self.app_ffn = nn.Sequential(
+#             nn.Linear(reid_dim, reid_dim),
+#             nn.SiLU(inplace=True),
+#             nn.Linear(reid_dim, reid_dim),
+#         )
+#         self.q_content  = nn.Linear(hidden_dim, reid_dim)
+#         self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
+
+#         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
+
+#     def build_emb_map(self, reid_feat, c1=None):
+#         x = reid_feat
+#         if self.use_s4_dense and c1 is not None:
+#             x = self.s4_fuse(c1, reid_feat)
+#         x = self.in_proj(x)
+#         return self.dense_tower(x)
+
+#     def _build_value(self, emb_map):
+#         B, C, H, W = emb_map.shape
+#         v = emb_map.flatten(2).permute(0, 2, 1)
+#         hd = C // self.num_heads
+#         v = v.reshape(B, H * W, self.num_heads, hd).permute(0, 2, 3, 1).contiguous()
+#         return [v], [[H, W]]
+
+#     def forward(self, query, boxes, reid_feat, c1=None, return_dense=False):
+#         if self.detach_input:
+#             reid_feat = reid_feat.detach()
+#             if c1 is not None:
+#                 c1 = c1.detach()
+
+#         emb_map = self.build_emb_map(reid_feat, c1)
+#         value_list, spatial_shapes = self._build_value(emb_map)
+
+#         q_in = self.norm_q(self.q_proj(query))
+#         app_raw = self.deform_attn(q_in, boxes.unsqueeze(2), value_list, spatial_shapes)
+#         app = self.norm_attn(app_raw)
+
+#         app     = app + self.app_ffn(app)
+#         emb_raw = app + self.query_gate * self.q_content(query)
+
+#         out = {
+#             'emb':     self.neck(emb_raw),
+#             'emb_raw': emb_raw,
+#             'emb_app': app_raw,
+#         }
+#         if return_dense:
+#             out['emb_map'] = emb_map
+#         return out
+
+
 class DenseReIDHead(nn.Module):
     """Decoupled ReID head with a single shared field for QAM, exposing
     'emb_app' so the dense `cons` loss no longer conflicts with dense_ce."""
     def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
                  use_s4_dense=False, s4_in_ch=None,
                  tower_depth=2, query_gate_init=0.1, detach_input=True,
+                 box_shrink_factor=0.5,  # [CẢI TIẾN 1]: Thu nhỏ box để tránh dính nền
                  **kwargs):
         super().__init__()
         nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
@@ -94,6 +184,7 @@ class DenseReIDHead(nn.Module):
         self.num_heads     = nh
         self.use_s4_dense  = bool(use_s4_dense and s4_in_ch is not None)
         self.detach_input  = bool(detach_input)
+        self.box_shrink_factor = box_shrink_factor
 
         # (2) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
         if self.use_s4_dense:
@@ -127,6 +218,12 @@ class DenseReIDHead(nn.Module):
         self.q_content  = nn.Linear(hidden_dim, reid_dim)
         self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
 
+        # [CẢI TIẾN 3]: Context-Aware Layer giúp các vector ReID đẩy nhau ra xa nếu đứng cạnh nhau
+        self.context_layer = nn.TransformerEncoderLayer(
+            d_model=reid_dim, nhead=4, dim_feedforward=reid_dim * 2, 
+            dropout=0.0, batch_first=True, norm_first=True
+        )
+
         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
 
     def build_emb_map(self, reid_feat, c1=None):
@@ -153,21 +250,29 @@ class DenseReIDHead(nn.Module):
         value_list, spatial_shapes = self._build_value(emb_map)
 
         q_in = self.norm_q(self.q_proj(query))
-        app_raw = self.deform_attn(q_in, boxes.unsqueeze(2), value_list, spatial_shapes)
+
+        # [CẢI TIẾN 1]: Shrink Bounding Box để Deformable Attention lấy mẫu chụm vào lõi vật thể
+        reid_boxes = boxes.clone()
+        reid_boxes[..., 2:] = reid_boxes[..., 2:] * self.box_shrink_factor
+
+        # Dùng reid_boxes đã shrink để lấy mẫu
+        app_raw = self.deform_attn(q_in, reid_boxes.unsqueeze(2), value_list, spatial_shapes)
         app = self.norm_attn(app_raw)
 
         app     = app + self.app_ffn(app)
         emb_raw = app + self.query_gate * self.q_content(query)
 
+        # [CẢI TIẾN 3]: Áp dụng Context-Aware Layer
+        emb_context = self.context_layer(emb_raw)
+
         out = {
-            'emb':     self.neck(emb_raw),
-            'emb_raw': emb_raw,
+            'emb':     self.neck(emb_context), # Dùng feature đã có bối cảnh
+            'emb_raw': emb_raw,                # Giữ nguyên bản để tính loss nếu cần
             'emb_app': app_raw,
         }
         if return_dense:
             out['emb_map'] = emb_map
         return out
-
 
 class S4AuxiliaryHead(nn.Module):
     def __init__(self, in_channels: int):
