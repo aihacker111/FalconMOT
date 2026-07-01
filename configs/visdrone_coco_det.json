@@ -1,7 +1,7 @@
 {
-    "root":      "/workspace/VisDrone2019-MIXED-COCO",
-    "train_ann": "/workspace/VisDrone2019-MIXED-COCO/train/annotations/instances_train.json",
-    "train_img": "/workspace/VisDrone2019-MIXED-COCO/train/images",
+    "root":      "/workspace/Visdrone2019-MIXED-COCO",
+    "train_ann": "/workspace/Visdrone2019-MIXED-COCO/train/annotations/instances_train.json",
+    "train_img": "/workspace/Visdrone2019-MIXED-COCO/train/images",
     "val_ann":   "/workspace/VisDrone2019-DET-COCO/val/annotations/instances_val.json",
     "val_img":   "/workspace/VisDrone2019-DET-COCO/val/images"
 }
