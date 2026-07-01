@@ -1,6 +1,7 @@
 """
 Script Gộp 2 bộ dữ liệu VisDrone (đã ở định dạng COCO JSON) thành 1 bộ COCO duy nhất.
-Tốc độ cực nhanh vì chỉ copy ảnh (không decode/encode bằng cv2) và xử lý JSON trong RAM.
+- Tốc độ cực nhanh vì chỉ copy ảnh và xử lý JSON trong RAM.
+- [UPDATE] Tích hợp Frame Sampling cho tập MOT (chống overfitting bối cảnh).
 """
 
 import os
@@ -46,12 +47,15 @@ def copy_worker(src, dst):
         shutil.copy2(src, dst)
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Gộp DET và MOT JSON, có chống Overfitting cho MOT.")
     parser.add_argument('--det_root', required=True, help='Đường dẫn gốc VisDrone2019-DET-COCO')
     parser.add_argument('--mot_root', required=True, help='Đường dẫn gốc VisDrone2019-COCO (MOT)')
     parser.add_argument('--output_root', required=True, help='Đường dẫn xuất dữ liệu gộp')
     parser.add_argument('--splits', nargs='+', default=['train', 'val'])
     parser.add_argument('--workers', type=int, default=16)
+    parser.add_argument('--mot_stride', type=int, default=5, 
+                        help='Lấy mẫu cách quãng cho tập MOT (tránh trùng lặp frame). '
+                             'Mặc định: 5 (Cứ 5 frame lấy 1 frame).')
     args = parser.parse_args()
 
     for split in args.splits:
@@ -86,30 +90,33 @@ def main():
         global_ann_id = 0
         
         # ─────────────────────────────────────────────────────────────────
-        # HÀM XỬ LÝ CHUNG CHO TỪNG BỘ DỮ LIỆU
+        # HÀM XỬ LÝ CHUNG CHO TỪNG BỘ DỮ LIỆU CÓ THÊM TÍNH NĂNG SAMPLING
         # ─────────────────────────────────────────────────────────────────
-        def process_dataset(dataset_data, root_dir, prefix):
+        def process_dataset(dataset_data, root_dir, prefix, sample_stride=1):
             nonlocal global_img_id, global_ann_id
             
             # Mapping image_id cũ -> image_id mới
             img_id_map = {}
             
             # Xử lý Images
-            for img in dataset_data['images']:
+            for i, img in enumerate(dataset_data['images']):
+                
+                # [CORE LOGIC]: Bỏ qua frame nếu không thỏa mãn sample_stride
+                if prefix == 'mot' and i % sample_stride != 0:
+                    continue
+                
                 old_id = img['id']
                 old_file_name = img['file_name']
                 
                 global_img_id += 1
                 img_id_map[old_id] = global_img_id
                 
-                # Tạo tên file mới để tránh trùng lặp, ví dụ: "det_0000001_02999_d_0000001.jpg"
-                # (Thay thế dấu gạch chéo thư mục bằng gạch dưới để làm phẳng thư mục)
+                # Tạo tên file mới để tránh trùng lặp
                 safe_name = old_file_name.replace('/', '_').replace('\\', '_')
                 new_file_name = f"{prefix}_{safe_name}"
                 
                 # Đường dẫn copy
                 src_path = os.path.join(root_dir, split, 'images', old_file_name)
-                # MOT COCO đôi khi ảnh nằm trong thư mục 'sequences'
                 if not os.path.exists(src_path):
                     src_path = os.path.join(root_dir, split, old_file_name)
                     
@@ -129,7 +136,7 @@ def main():
             # Xử lý Annotations
             valid_anns = 0
             for ann in dataset_data['annotations']:
-                # Bỏ qua các annotation trỏ tới ảnh không tồn tại
+                # Bỏ qua các annotation trỏ tới ảnh đã bị skip (do stride) hoặc không tồn tại
                 if ann['image_id'] not in img_id_map:
                     continue
                 
@@ -152,15 +159,18 @@ def main():
                     
                     merged_anns.append(new_ann)
                     
-            print(f"  [{prefix.upper()}] Thêm {len(img_id_map)} ảnh và {valid_anns} bounding boxes hợp lệ.")
+            print(f"  [{prefix.upper()}] Thêm {len(img_id_map)} ảnh và {valid_anns} bounding boxes hợp lệ (stride={sample_stride}).")
 
         # ─────────────────────────────────────────────────────────────────
-        # THỰC THI
+        # THỰC THI (Gọi hàm)
         # ─────────────────────────────────────────────────────────────────
-        process_dataset(det_data, args.det_root, 'det')
-        process_dataset(mot_data, args.mot_root, 'mot')
+        # DET: Lấy 100% (stride = 1)
+        process_dataset(det_data, args.det_root, 'det', sample_stride=1)
         
-        # Tiến hành Copy ảnh bằng đa luồng (Tốc độ bàn thờ)
+        # MOT: Lấy cách quãng (stride theo args) để tránh trùng lặp bối cảnh
+        process_dataset(mot_data, args.mot_root, 'mot', sample_stride=args.mot_stride)
+        
+        # Tiến hành Copy ảnh bằng đa luồng (Tốc độ cực nhanh)
         print(f"Đang copy {len(copy_tasks)} hình ảnh vào thư mục chung...")
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             list(tqdm(executor.map(lambda x: copy_worker(*x), copy_tasks), total=len(copy_tasks)))
