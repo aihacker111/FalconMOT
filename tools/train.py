@@ -1001,7 +1001,7 @@ def run(opt):
     trainer = Trainer(opt=opt, model=model, optimizer=optimizer)
     trainer.set_device(opt.gpus, opt.chunk_sizes, opt.device)
 
-    if in_phase1:
+    if reid_only:
         phase_epochs = max(1, opt.num_epochs - warmup_ep)
     else:
         phase_epochs = warmup_ep if warmup_ep > 0 else opt.num_epochs
