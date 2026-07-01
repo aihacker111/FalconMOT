@@ -1,8 +1,19 @@
 # import copy
 # import os
 # import json
+# import collections
+# from concurrent.futures import ThreadPoolExecutor
 
+# import cv2
 # import numpy as np
+
+# # Progress bar — optional dependency. Falls back to a no-op wrapper if tqdm
+# # is not installed so eval still runs (just without the live bar).
+# try:
+#     from tqdm import tqdm
+# except Exception:  # pragma: no cover
+#     def tqdm(iterable=None, **kwargs):
+#         return iterable if iterable is not None else []
 # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 # import torch
 # import torch.utils.data
@@ -21,9 +32,9 @@
 # from falconmot.nn.falcon_jde.postprocessor import FalconJDEPostProcessor
 # from collections import defaultdict as _defaultdict
 # from falconmot.tracker.multitracker import MCJDETracker, MCTrack
-# from falconmot.tracker.utils.coco_gt_reader import CocoGTEvaluator
-# from falconmot.tracker.utils.evaluation import Evaluator
-# from falconmot.data.dataset import LoadCocoSequencesForTracking
+# from falconmot.tracker.utils.coco_gt_reader import load_all_coco_gt
+# from falconmot.tracker.utils.hota import HOTACollector, box_iou_matrix
+# from falconmot.data.dataset import LoadCocoSequencesForTracking, preprocess_for_tracking
 
 
 # def _with_lr(opt, lr):
@@ -107,13 +118,101 @@
 #     return evaluator.summarize()
 
 
-# @torch.no_grad()
+# class _ParallelFrameReader:
+#     """Read + preprocess a sequence's frames in worker threads, yield IN ORDER.
+
+#     The tracker is stateful (Kalman + ReID memory) so frames must reach it in
+#     order — but the *loading* of frame N+1..N+k (disk read + resize + normalize)
+#     can overlap with the GPU forward of frame N. cv2.imread and the numpy
+#     resize/normalize release the GIL, so threads give real parallelism here and
+#     keep the GPU fed instead of idling on disk I/O.
+
+#     Emits the same (frame_id, img_chw, img0_bgr) tuples as _CocoSeqIterator.
+#     """
+
+#     def __init__(self, frames, width, height, num_workers=4, prefetch=8):
+#         self.frames      = frames
+#         self.width       = width
+#         self.height      = height
+#         self.num_workers = max(1, int(num_workers))
+#         # Keep at least num_workers reads in flight; deeper window hides latency.
+#         self.prefetch    = max(self.num_workers, int(prefetch))
+
+#     @staticmethod
+#     def _load(args):
+#         frame_id, path, w, h = args
+#         img0 = cv2.imread(path)
+#         img  = preprocess_for_tracking(img0, w, h)
+#         return frame_id, img, img0
+
+#     def __iter__(self):
+#         tasks = ((fid, p, self.width, self.height) for fid, p in self.frames)
+#         with ThreadPoolExecutor(max_workers=self.num_workers) as ex:
+#             inflight = collections.deque()
+#             # Prime the sliding window.
+#             for _ in range(self.prefetch):
+#                 try:
+#                     inflight.append(ex.submit(self._load, next(tasks)))
+#                 except StopIteration:
+#                     break
+#             # Yield oldest-first while topping the window back up.
+#             while inflight:
+#                 fut = inflight.popleft()
+#                 try:
+#                     inflight.append(ex.submit(self._load, next(tasks)))
+#                 except StopIteration:
+#                     pass
+#                 yield fut.result()
+
+
+# def _collect_hota_frame(coll, class_names, seq_id, gt_objs, pred_tlwhs, pred_tids, offset):
+#     """Feed one frame's GT + tracker output into the HOTACollector, split per class.
+
+#     The class is baked into the (global) id as ``id // offset`` on both sides, so
+#     GT global_id and tracker global_id (track_id + c*offset) split identically.
+#     Frames that are empty for a class (no GT, no pred) contribute nothing to HOTA
+#     and are skipped — this shrinks the per-(class,seq) timestep list and speeds up
+#     the final TrackEval pass without changing the score.
+#     """
+#     ncls = len(class_names)
+#     gt_b = [[] for _ in range(ncls)]
+#     gt_i = [[] for _ in range(ncls)]
+#     for tlwh, gid, _vis in gt_objs:
+#         c = int(gid) // offset
+#         if 0 <= c < ncls:
+#             gt_b[c].append(tlwh)
+#             gt_i[c].append(int(gid))
+
+#     pr_b = [[] for _ in range(ncls)]
+#     pr_i = [[] for _ in range(ncls)]
+#     for tlwh, tid in zip(pred_tlwhs, pred_tids):
+#         c = int(tid) // offset
+#         if 0 <= c < ncls:
+#             pr_b[c].append(tlwh)
+#             pr_i[c].append(int(tid))
+
+#     for c in range(ncls):
+#         if not gt_i[c] and not pr_i[c]:
+#             continue
+#         g = np.asarray(gt_b[c], dtype=np.float64).reshape(-1, 4)
+#         p = np.asarray(pr_b[c], dtype=np.float64).reshape(-1, 4)
+#         sim = box_iou_matrix(g, p)
+#         coll.add_frame(class_names[c], seq_id, gt_i[c], pr_i[c], sim)
+
+
+# @torch.inference_mode()
 # def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
-#     """Tracking validation (IDF1/MOTA) over val sequences.
+#     """Tracking validation over val sequences — HOTA metrics only.
 
 #     Uses the native class space without any class remap. GMC is disabled for
-#     speed and determinism (set_image is never called). Returns a dict with
-#     keys: idf1, mota, num_switches, track_score, fps.
+#     speed and determinism (set_image is never called). Returns a dict with the
+#     HOTA-family scalars from hota.py (hota/deta/assa/loca/detre/assre) plus
+#     track_score (= HOTA, drives model_best) and fps.
+
+#     Speed: frame loading is pipelined across threads (overlaps disk I/O with
+#     GPU inference), the detector forward runs in fp16 autocast when
+#     --track_val_fp16 is set, and HOTA is computed in-memory (no result .txt
+#     round-trip) with a parallel TrackEval pass. A tqdm bar shows live progress.
 #     """
 #     import time
 
@@ -140,21 +239,49 @@
 
 #     src = LoadCocoSequencesForTracking(val_ann_file, val_img_root, img_size=opt.img_size)
 
-#     accs, names = [], []
+#     # ── Class names for HOTA (native class space, no remap) ─────────────────
+#     # HOTA is computed per class then class-averaged (VisDrone convention).
+#     try:
+#         from falconmot.tracker.class_remap import CLS7_NAMES, CLS5_NAMES, CLS4_NAMES
+#         _name_tables = {7: CLS7_NAMES, 5: CLS5_NAMES, 4: CLS4_NAMES}
+#     except Exception:
+#         _name_tables = {}
+#     _names_map = _name_tables.get(ncls, {})
+#     class_names = {c: _names_map.get(c, f'class_{c}') for c in range(ncls)}
+#     hota_names  = [class_names[c] for c in range(ncls)]
+#     coll = HOTACollector(hota_names)
+
+#     # ── Parse GT ONCE (instead of re-parsing the whole json per sequence) ───
+#     gt_by_seq = load_all_coco_gt(val_ann_file)
+
+#     # ── fp16 autocast for the detector forward (wires up --track_val_fp16) ──
+#     use_fp16 = bool(int(getattr(opt, 'track_val_fp16', 1))) and opt.device.type == 'cuda'
+
+#     # ── Threaded frame prefetch params (overlap disk I/O with GPU) ──────────
+#     n_threads  = int(getattr(opt, 'track_val_loader_threads', 4))
+#     prefetch   = int(getattr(opt, 'track_val_prefetch', 8))
+
 #     t0, n_frames = time.time(), 0
+
+#     total_frames = sum(src.num_frames(s) for s in src.seqs)
+#     pbar = tqdm(total=total_frames, desc='[track-eval]', unit='f', dynamic_ncols=True)
 
 #     for seq_id in src.seqs:
 #         tracker.reset()
-#         ev = CocoGTEvaluator(val_ann_file, seq_id)
-#         ev.reset_accumulator()
+#         gt_frames = gt_by_seq.get(seq_id, {})
 
-#         for frame_id, img, img0 in src.sequence(seq_id):
+#         frames = src._seq_frames[seq_id]
+#         reader = _ParallelFrameReader(frames, net_w, net_h,
+#                                       num_workers=n_threads, prefetch=prefetch)
+
+#         for frame_id, img, img0 in reader:
 #             orig_h, orig_w = img0.shape[:2]
 #             sizes = torch.tensor([[orig_h, orig_w]], device=opt.device)
-#             blob  = torch.from_numpy(img[None]).to(opt.device)
+#             blob  = torch.from_numpy(img[None]).to(opt.device, non_blocking=True)
 
-#             output = model(blob)
-#             res = postproc(output, sizes)[0]
+#             with torch.autocast('cuda', dtype=torch.float16, enabled=use_fp16):
+#                 output = model(blob)
+#                 res = postproc(output, sizes)[0]
 
 #             dets = _defaultdict(list)
 #             if len(res['scores']) > 0:
@@ -182,30 +309,38 @@
 #                         continue
 #                     tlwhs.append(t.curr_tlwh)
 #                     tids.append(int(t.track_id) + c * _OFF)
-#             ev.eval_frame(int(frame_id), tlwhs, tids)
+
+#             _collect_hota_frame(coll, class_names, seq_id,
+#                                 gt_frames.get(int(frame_id), []),
+#                                 tlwhs, tids, _OFF)
 #             n_frames += 1
+#             pbar.update(1)
+#             if n_frames % 20 == 0:
+#                 pbar.set_postfix_str(f'{n_frames / max(1e-6, time.time() - t0):.1f} fps')
 
-#         accs.append(ev.acc)
-#         names.append(seq_id)
-
+#     pbar.close()
+#     infer_elapsed = time.time() - t0   # pure inference time (excludes HOTA compute)
 #     model.train()
 
-#     if not accs:
+#     if n_frames == 0:
 #         return {}
 
-#     summary = Evaluator.get_summary(
-#         accs, names, metrics=('mota', 'num_switches', 'idf1', 'idp', 'idr'))
-#     row  = summary.loc['OVERALL']
-#     idf1 = float(row['idf1'])
-#     mota = float(row['mota'])
-#     nsw  = int(row['num_switches'])
-#     w_id = float(getattr(opt, 'track_val_w_idf1', 0.6))
-#     w_mo = float(getattr(opt, 'track_val_w_mota', 0.4))
-#     fps  = n_frames / max(1e-6, time.time() - t0)
-#     return {
-#         'idf1': idf1, 'mota': mota, 'num_switches': nsw,
-#         'track_score': w_id * idf1 + w_mo * mota, 'fps': fps,
-#     }
+#     # ── HOTA (the only metric — drives model_best selection) ────────────────
+#     hota_workers = int(getattr(opt, 'track_val_hota_workers', 0)) or min(8, os.cpu_count() or 4)
+#     try:
+#         hres = coll.compute(num_workers=hota_workers)
+#     except Exception as e:
+#         print(f'[track-eval] HOTA unavailable ({e}); install TrackEval to enable it. '
+#               f'Skipping best-model update this round.')
+#         return {'fps': n_frames / max(1e-6, infer_elapsed)}
+
+#     ov  = hres['overall']
+#     fps = n_frames / max(1e-6, infer_elapsed)
+#     out = {k.lower(): float(ov.get(k, 0.0))
+#            for k in ('HOTA', 'DetA', 'AssA', 'LocA', 'DetRe', 'AssRe')}
+#     out['track_score'] = out['hota']     # best model selected by HOTA
+#     out['fps'] = fps
+#     return out
 
 
 # def run(opt):
@@ -243,7 +378,7 @@
 #         dataset = Dataset(opt=opt, root=dataset_root,
 #                           paths=data_config['train'], img_size=opt.input_wh,
 #                           augment=True, transforms=T.Compose([T.ToTensor()]))
-
+#     opt = opts().init()
 #     opt = opts().update_dataset_info_and_set_heads(opt, dataset)
 #     print("opt:\n", opt)
 #     logger = Logger(opt)
@@ -313,23 +448,41 @@
 #             except Exception:
 #                 start_epoch = 0
 
-#     # ── Training stage policy ───────────────────────────────────────────────
+#     # # ── Training stage policy ───────────────────────────────────────────────
+#     # det_only  = getattr(opt, 'train_single_det', False)
+#     # warmup_ep = max(0, getattr(opt, 'reid_warmup_epochs', 0))
+#     # p0_lr     = opt.lr if getattr(opt, 'reid_warmup_lr', -1) <= 0 else opt.reid_warmup_lr
+
+#     # in_phase1 = det_only or start_epoch >= warmup_ep
+#     # if det_only:
+#     #     stage_mgr.apply_det_only(model)
+#     #     init_lr = opt.lr
+#     # elif in_phase1:
+#     #     stage_mgr.apply_phase1(model, keep_backbone_frozen=False, freeze_norm=False)
+#     #     init_lr = opt.lr
+#     # else:
+#     #     stage_mgr.apply_phase0(model)
+#     #     init_lr = p0_lr
+#     # ========================================================================
+#     # ── Training stage policy (Stage 1 vs Stage 2) ──────────────────────────
+#     # ========================================================================
 #     det_only  = getattr(opt, 'train_single_det', False)
-#     warmup_ep = max(0, getattr(opt, 'reid_warmup_epochs', 0))
-#     p0_lr     = opt.lr if getattr(opt, 'reid_warmup_lr', -1) <= 0 else opt.reid_warmup_lr
+#     reid_only = getattr(opt, 'train_reid_only', False)
 
-#     in_phase1 = det_only or start_epoch >= warmup_ep
+#     if det_only and reid_only:
+#         raise ValueError("Cannot set both --train_single_det and --train_reid_only!")
+
 #     if det_only:
+#         # QUÁ TRÌNH 1
 #         stage_mgr.apply_det_only(model)
-#         init_lr = opt.lr
-#     elif in_phase1:
-#         stage_mgr.apply_phase1(model, keep_backbone_frozen=False, freeze_norm=False)
-#         init_lr = opt.lr
+#     elif reid_only:
+#         # QUÁ TRÌNH 2: Gọi hàm khóa detection
+#         stage_mgr.apply_reid_only(model)
 #     else:
-#         stage_mgr.apply_phase0(model)
-#         init_lr = p0_lr
+#         # Fallback (Phòng trường hợp bạn muốn train chung cả 2 cùng lúc)
+#         stage_mgr.apply_joint_training(model)
 
-#     optimizer = build_optimizer(model, _with_lr(opt, init_lr))
+#     optimizer = build_optimizer(model, _with_lr(opt, opt.lr))
 
 #     _nw = opt.num_workers
 #     train_loader = torch.utils.data.DataLoader(
@@ -446,26 +599,27 @@
 #         )
 #         skip_p0 = (not in_phase1) and not getattr(opt, 'track_val_in_phase0', False)
 #         if do_track and not skip_p0:
-#             print(f'\n[Track-Eval] epoch {epoch} — running tracking IDF1/MOTA (GMC off)...')
+#             print(f'\n[Track-Eval] epoch {epoch} — running HOTA tracking eval (GMC off)...')
 #             tmetrics = run_track_eval(model, opt, val_ann_file, val_img_root)
-#             if tmetrics:
-#                 tline = (f"IDF1 {tmetrics['idf1']:.4f}  MOTA {tmetrics['mota']:.4f}  "
-#                          f"IDsw {tmetrics['num_switches']}  "
-#                          f"score {tmetrics['track_score']:.4f}  "
+#             if tmetrics and 'hota' in tmetrics:
+#                 tline = (f"HOTA {tmetrics['hota']:.4f}  DetA {tmetrics['deta']:.4f}  "
+#                          f"AssA {tmetrics['assa']:.4f}  LocA {tmetrics['loca']:.4f}  "
+#                          f"DetRe {tmetrics['detre']:.4f}  AssRe {tmetrics['assre']:.4f}  "
 #                          f"({tmetrics['fps']:.1f} fps)")
 #                 print(f'[Track-Eval] {tline}')
 #                 logger.write(f'[track] {tline} | ')
-#                 logger.scalar_summary('val_idf1', tmetrics['idf1'], epoch)
-#                 logger.scalar_summary('val_mota', tmetrics['mota'], epoch)
-#                 logger.scalar_summary('val_idsw', tmetrics['num_switches'], epoch)
+#                 logger.scalar_summary('val_hota', tmetrics['hota'], epoch)
+#                 logger.scalar_summary('val_deta', tmetrics['deta'], epoch)
+#                 logger.scalar_summary('val_assa', tmetrics['assa'], epoch)
+#                 logger.scalar_summary('val_loca', tmetrics['loca'], epoch)
 #                 logger.scalar_summary('val_track_score', tmetrics['track_score'], epoch)
 
 #                 if tmetrics['track_score'] > best_track:
 #                     best_track = tmetrics['track_score']
 #                     save_model(os.path.join(opt.save_dir, 'model_best.pth'),
 #                                epoch, model, optimizer)
-#                     print(f"[Track-Eval] ★ New best track_score={best_track:.4f} "
-#                           f"(IDF1={tmetrics['idf1']:.4f}, MOTA={tmetrics['mota']:.4f}) "
+#                     print(f"[Track-Eval] ★ New best HOTA={best_track:.4f} "
+#                           f"(DetA={tmetrics['deta']:.4f}, AssA={tmetrics['assa']:.4f}) "
 #                           f"→ model_best.pth")
 
 #         logger.write('\n')
@@ -486,10 +640,6 @@
 #     print("opt.gpus: ", opt.gpus)
 #     print('epoch:', opt.num_epochs)
 #     run(opt)
-
-
-
-
 
 
 
@@ -544,24 +694,28 @@ def _with_lr(opt, lr):
 
 
 def _print_stage1_banner(opt):
-    if not getattr(opt, 'train_single_det', False):
-        return
-    w, h = opt.input_wh[0], opt.input_wh[1]
-    es = getattr(opt, 'eval_spatial_size', [h, w])
-    print('=' * 72)
-    print('Stage-1 detection-only training  (--train_single_det)')
-    print(f'  input {w}x{h}  eval_spatial_size={es}  use_s4={getattr(opt, "use_s4", False)} '
-          f'use_s4_aux={getattr(opt, "use_s4_aux", True)}')
-    print(f'  losses: cls + bbox + giou'
-          f"{' + s4_aux' if (getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True)) else ''}  |  "
-          f'ReID: OFF')
-    print(f'  aug: mosaic={getattr(opt, "mosaic", False)} '
-          f'(p={getattr(opt, "mosaic_prob", 0.5)})  '
-          f'temporal_mosaic=OFF')
-    if getattr(opt, 'deim_pretrained', ''):
-        print(f'  deim_pretrained: {opt.deim_pretrained}')
-    print('  stage-2: load checkpoint WITHOUT --train_single_det')
-    print('=' * 72)
+    if getattr(opt, 'train_single_det', False):
+        w, h = opt.input_wh[0], opt.input_wh[1]
+        es = getattr(opt, 'eval_spatial_size', [h, w])
+        print('=' * 72)
+        print('STAGE 1: Detection-only training (--train_single_det)')
+        print(f'  input {w}x{h}  eval_spatial_size={es}  use_s4={getattr(opt, "use_s4", False)} '
+              f'use_s4_aux={getattr(opt, "use_s4_aux", True)}')
+        print(f'  losses: cls + bbox + giou'
+              f"{' + s4_aux' if (getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True)) else ''}  |  "
+              f'ReID: OFF')
+        print(f'  aug: mosaic={getattr(opt, "mosaic", False)} '
+              f'(p={getattr(opt, "mosaic_prob", 0.5)})  '
+              f'temporal_mosaic=OFF')
+        if getattr(opt, 'deim_pretrained', ''):
+            print(f'  deim_pretrained: {opt.deim_pretrained}')
+        print('=' * 72)
+    elif getattr(opt, 'train_reid_only', False):
+        print('=' * 72)
+        print('STAGE 2: ReID-only training (--train_reid_only)')
+        print('  Detector is completely FROZEN (including BatchNorm stats).')
+        print('  Training ONLY the ReID head and Orthogonal Feature Loss.')
+        print('=' * 72)
 
 
 def _summarize_model(model, opt):
@@ -947,21 +1101,6 @@ def run(opt):
             except Exception:
                 start_epoch = 0
 
-    # # ── Training stage policy ───────────────────────────────────────────────
-    # det_only  = getattr(opt, 'train_single_det', False)
-    # warmup_ep = max(0, getattr(opt, 'reid_warmup_epochs', 0))
-    # p0_lr     = opt.lr if getattr(opt, 'reid_warmup_lr', -1) <= 0 else opt.reid_warmup_lr
-
-    # in_phase1 = det_only or start_epoch >= warmup_ep
-    # if det_only:
-    #     stage_mgr.apply_det_only(model)
-    #     init_lr = opt.lr
-    # elif in_phase1:
-    #     stage_mgr.apply_phase1(model, keep_backbone_frozen=False, freeze_norm=False)
-    #     init_lr = opt.lr
-    # else:
-    #     stage_mgr.apply_phase0(model)
-    #     init_lr = p0_lr
     # ========================================================================
     # ── Training stage policy (Stage 1 vs Stage 2) ──────────────────────────
     # ========================================================================
@@ -972,13 +1111,13 @@ def run(opt):
         raise ValueError("Cannot set both --train_single_det and --train_reid_only!")
 
     if det_only:
-        # QUÁ TRÌNH 1
+        # STAGE 1: Detection only
         stage_mgr.apply_det_only(model)
     elif reid_only:
-        # QUÁ TRÌNH 2: Gọi hàm khóa detection
+        # STAGE 2: Freeze Detection, Train ReID
         stage_mgr.apply_reid_only(model)
     else:
-        # Fallback (Phòng trường hợp bạn muốn train chung cả 2 cùng lúc)
+        # Fallback / Joint Training
         stage_mgr.apply_joint_training(model)
 
     optimizer = build_optimizer(model, _with_lr(opt, opt.lr))
@@ -1001,17 +1140,11 @@ def run(opt):
     trainer = Trainer(opt=opt, model=model, optimizer=optimizer)
     trainer.set_device(opt.gpus, opt.chunk_sizes, opt.device)
 
-    if reid_only:
-        phase_epochs = max(1, opt.num_epochs - warmup_ep)
-    else:
-        phase_epochs = warmup_ep if warmup_ep > 0 else opt.num_epochs
     scheduler = stage_mgr.build_phase_scheduler(
-        optimizer, opt, build_scheduler, steps_per_epoch, phase_epochs,
+        optimizer, opt, build_scheduler, steps_per_epoch, opt.num_epochs,
         warmup_iters=min(getattr(opt, 'warmup_iters', 2000), steps_per_epoch))
 
-    if in_phase1 and start_epoch > warmup_ep:
-        scheduler.fast_forward((start_epoch - warmup_ep) * steps_per_epoch)
-    elif (not in_phase1) and start_epoch > 0:
+    if start_epoch > 0:
         scheduler.fast_forward(start_epoch * steps_per_epoch)
 
     best_mAP   = 0.0
@@ -1020,33 +1153,12 @@ def run(opt):
     for epoch in range(start_epoch + 1, opt.num_epochs + 1):
         mark = epoch if opt.save_all else 'last'
 
-        # ── Phase 0 → Phase 1 transition ───────────────────────────────────
-        if (not det_only) and (not in_phase1) and epoch > warmup_ep:
-            in_phase1 = True
-            stage_mgr.apply_phase1(
-                model,
-                keep_backbone_frozen=getattr(opt, 'keep_backbone_frozen', False),
-                freeze_norm=getattr(opt, 'freeze_norm_stats', False))
-            optimizer = stage_mgr.build_phase_optimizer(
-                model, trainer.loss, opt, build_optimizer, lr=opt.lr)
-            trainer.optimizer = optimizer
-            trainer.set_device(opt.gpus, opt.chunk_sizes, opt.device)
-            scheduler = stage_mgr.build_phase_scheduler(
-                optimizer, opt, build_scheduler, steps_per_epoch,
-                max(1, opt.num_epochs - warmup_ep),
-                warmup_iters=min(getattr(opt, 'warmup_iters', 2000), steps_per_epoch))
-            print(f'[stage] >>> switched to Phase 1 (joint) at epoch {epoch}')
-
-        # ── id_weight schedule ──────────────────────────────────────────────
+        # ── id_weight setup ────────────────────────────────────────────────
         if det_only:
             trainer.loss.id_weight = 0.0
-        elif in_phase1:
-            stage_mgr.ramp_id_weight(trainer.loss, opt.id_weight,
-                                     epoch - warmup_ep,
-                                     getattr(opt, 'id_warmup_epochs', 0))
         else:
+            # Stage 2 (reid_only) or joint: use constant id_weight
             trainer.loss.id_weight = opt.id_weight
-        if not det_only:
             logger.write('id_w {:.3f} | '.format(trainer.loss.id_weight))
 
         train_loader.dataset.set_epoch(epoch - 1)
@@ -1096,8 +1208,7 @@ def run(opt):
             and opt.val_intervals > 0
             and epoch % max(1, _tvi) == 0
         )
-        skip_p0 = (not in_phase1) and not getattr(opt, 'track_val_in_phase0', False)
-        if do_track and not skip_p0:
+        if do_track:
             print(f'\n[Track-Eval] epoch {epoch} — running HOTA tracking eval (GMC off)...')
             tmetrics = run_track_eval(model, opt, val_ann_file, val_img_root)
             if tmetrics and 'hota' in tmetrics:
