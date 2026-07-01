@@ -324,7 +324,7 @@ def apply_stage2_mot(model):
             _set_module_trainable(m.s4_aux_head, False, 's4_aux_head')
 
     # 2. Mở khóa Decoder để queries thích nghi với bài toán MOT
-    _set_module_trainable(m.decoder, True, 'decoder')
+    _set_module_trainable(m.decoder, False, 'decoder')
 
     # 3. Mở khóa mạng ReID
     if _has_reid_head(model):
