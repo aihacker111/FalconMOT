@@ -578,7 +578,7 @@ class MCJDETracker(object):
             self.tracked_tracks_dict[cls_id], self.lost_tracks_dict[cls_id] = \
                 remove_duplicate_tracks(self.tracked_tracks_dict[cls_id],
                                         self.lost_tracks_dict[cls_id])
-            remove_cross_class_duplicates(self.tracked_tracks_dict, self.lost_tracks_dict, iou_thresh=0.75)
+            self.remove_cross_class_duplicates(self.tracked_tracks_dict, self.lost_tracks_dict, iou_thresh=0.75)
             output_tracks_dict[cls_id] = [
                 t for t in self.tracked_tracks_dict[cls_id] if t.is_activated]
             
