@@ -943,7 +943,7 @@ class opts(object):
                       help='Dense ReID map at stride-4 (small objects). Requires c1=_s4_feat.')
         self.parser.add_argument('--reid_w_dense_ce', type=float, default=1.0)
         self.parser.add_argument('--reid_w_cons',     type=float, default=0.5)
-        self.parser.add_argument('--reid_lr_factor', type=float, default=3.0)
+        self.parser.add_argument('--reid_lr_factor', type=float, default=1.0)
         
         # ── Distributed ────────────────────────────────────────────────────
         self.parser.add_argument('--local-rank', type=int, default=0)
