@@ -80,7 +80,12 @@ class FalconVideoTracker:
         self.model = create_model(opt.arch, opt)
         self.model = load_model(self.model, opt.load_model)
         self.model = self.model.to(self.device).eval()
-
+        if hasattr(model, 'log_am_tau'):
+            learned_tau = torch.exp(model.log_am_tau).item()
+            print(f"[*] 🚀 Realtime tracker current use Learned am_tau = {learned_tau:.4f} (instead of {opt.am_tau})")
+            opt.am_tau = learned_tau
+        else:
+            print(f"[*] Use default am_tau = {opt.am_tau}")
         # QAM: ask the model to return the dense appearance map.
         if self.use_am:
             inner = getattr(self.model, "module", self.model)

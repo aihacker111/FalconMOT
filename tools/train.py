@@ -947,21 +947,39 @@ def run(opt):
             except Exception:
                 start_epoch = 0
 
-    # ── Training stage policy ───────────────────────────────────────────────
-    det_only  = getattr(opt, 'train_single_det', False)
-    warmup_ep = max(0, getattr(opt, 'reid_warmup_epochs', 0))
-    p0_lr     = opt.lr if getattr(opt, 'reid_warmup_lr', -1) <= 0 else opt.reid_warmup_lr
+    # # ── Training stage policy ───────────────────────────────────────────────
+    # det_only  = getattr(opt, 'train_single_det', False)
+    # warmup_ep = max(0, getattr(opt, 'reid_warmup_epochs', 0))
+    # p0_lr     = opt.lr if getattr(opt, 'reid_warmup_lr', -1) <= 0 else opt.reid_warmup_lr
 
-    in_phase1 = det_only or start_epoch >= warmup_ep
+    # in_phase1 = det_only or start_epoch >= warmup_ep
+    # if det_only:
+    #     stage_mgr.apply_det_only(model)
+    #     init_lr = opt.lr
+    # elif in_phase1:
+    #     stage_mgr.apply_phase1(model, keep_backbone_frozen=False, freeze_norm=False)
+    #     init_lr = opt.lr
+    # else:
+    #     stage_mgr.apply_phase0(model)
+    #     init_lr = p0_lr
+    # ========================================================================
+    # ── Training stage policy (Stage 1 vs Stage 2) ──────────────────────────
+    # ========================================================================
+    det_only  = getattr(opt, 'train_single_det', False)
+    reid_only = getattr(opt, 'train_reid_only', False)
+
+    if det_only and reid_only:
+        raise ValueError("Cannot set both --train_single_det and --train_reid_only!")
+
     if det_only:
+        # QUÁ TRÌNH 1
         stage_mgr.apply_det_only(model)
-        init_lr = opt.lr
-    elif in_phase1:
-        stage_mgr.apply_phase1(model, keep_backbone_frozen=False, freeze_norm=False)
-        init_lr = opt.lr
+    elif reid_only:
+        # QUÁ TRÌNH 2: Gọi hàm khóa detection
+        stage_mgr.apply_reid_only(model)
     else:
-        stage_mgr.apply_phase0(model)
-        init_lr = p0_lr
+        # Fallback (Phòng trường hợp bạn muốn train chung cả 2 cùng lúc)
+        stage_mgr.apply_joint_training(model)
 
     optimizer = build_optimizer(model, _with_lr(opt, init_lr))
 
