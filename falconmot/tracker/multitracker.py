@@ -380,6 +380,56 @@ class MCJDETracker(object):
         self.frame_id = 0
         self.kalman_filter = KalmanFilter()
 
+    def remove_cross_class_duplicates(self, tracked_dict, lost_dict, iou_thresh=0.70):
+        """
+        Duyệt qua toàn bộ các track của tất cả các lớp để tìm các track bị trùng lặp không gian (IoU cao).
+        Nếu hai track thuộc hai lớp khác nhau trùng nhau, giữ lại track có thời gian sống lâu hơn (track_len)
+        hoặc đang có detection thực tế gánh (Tracked thắng Lost).
+        """
+        all_tracks = []
+        # Thu thập toàn bộ track đang hoạt động
+        for cls_id in tracked_dict.keys():
+            for t in tracked_dict[cls_id]:
+                if t.is_activated:
+                    all_tracks.append(t)
+            for t in lost_dict[cls_id]:
+                if t.is_activated:
+                    all_tracks.append(t)
+
+        if len(all_tracks) < 2:
+            return
+
+        # Tính toán ma trận khoảng cách IoU giữa tất cả các track
+        # Sử dụng hàm iou_distance đã có trong file matching.py
+        from falconmot.tracker import matching
+        dists = matching.iou_distance(all_tracks, all_tracks)
+        
+        # Tìm các cặp trùng lặp (IoU > thresh tương đương dist < 1 - thresh)
+        pairs = np.where(dists < (1.0 - iou_thresh))
+        
+        for i, j in zip(pairs[0], pairs[1]):
+            if i >= j: # Tránh trùng lặp cặp (i,j) và (j,i) hoặc chính nó
+                continue
+                
+            t1 = all_tracks[i]
+            t2 = all_tracks[j]
+            
+            # Nếu trùng lớp thì hàm nội bộ lớp đã xử lý rồi, ta chỉ xử lý lệch lớp
+            if t1.cls_id == t2.cls_id:
+                continue
+                
+            # Tiêu chí loại bỏ: ưu tiên track đang ở trạng thái Tracked hơn Lost, 
+            # nếu cùng trạng thái thì ưu tiên track có chiều dài lịch sử (track_len) lớn hơn
+            if t1.state == 1 and t2.state == 2: # t1 Tracked, t2 Lost
+                t2.mark_removed()
+            elif t2.state == 1 and t1.state == 2: # t2 Tracked, t1 Lost
+                t1.mark_removed()
+            else:
+                if t1.track_len >= t2.track_len:
+                    t2.mark_removed()
+                else:
+                    t1.mark_removed()
+
     def update(self, dets_per_class, h_orig, w_orig):
         """Run one tracking step.
 
@@ -528,10 +578,10 @@ class MCJDETracker(object):
             self.tracked_tracks_dict[cls_id], self.lost_tracks_dict[cls_id] = \
                 remove_duplicate_tracks(self.tracked_tracks_dict[cls_id],
                                         self.lost_tracks_dict[cls_id])
-
+            remove_cross_class_duplicates(self.tracked_tracks_dict, self.lost_tracks_dict, iou_thresh=0.75)
             output_tracks_dict[cls_id] = [
                 t for t in self.tracked_tracks_dict[cls_id] if t.is_activated]
-
+            
         return output_tracks_dict
 
 
