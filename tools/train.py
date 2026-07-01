@@ -1853,7 +1853,7 @@ def run_reid_eval(model, val_loader, criterion, opt) -> dict:
         outputs = model(batch['input'], targets)
         
         # Chỉ tính Loss (Bỏ qua Detection)
-        loss_dict = criterion(outputs, targets, epoch=0, compute_det_loss=False)
+        loss_dict = criterion(outputs, targets, epoch=0)
         
         # Cộng dồn ReID Loss
         if 'loss_reid' in loss_dict:
