@@ -979,7 +979,7 @@ class opts(object):
         print('Output will be saved to', opt.save_dir)
  
         # Check mutual exclusion
-        if opt.train_single_det and opt.train_reid_only:
+        if opt.train_single_det and opt.train_stage2_mot:
             raise ValueError("Error: --train_single_det and --train_reid_only cannot be used together!")
 
         # Stage-1 detection-only: VisDrone-DET has no track IDs.
@@ -994,7 +994,7 @@ class opts(object):
                   f'ReID head OFF | losses: cls+bbox+giou{s4_tag} | '
                   f'use_s4={getattr(opt, "use_s4", False)} | '
                   f'mosaic={getattr(opt, "mosaic", False)} | temporal_mosaic=OFF')
-        elif opt.train_reid_only:
+        elif opt.train_stage2_mot:
             opt.use_reid = True
             print('[train_reid_only] STAGE 2 (ReID-only): '
                   'Detector FROZEN | Training ONLY ReID head & Orthogonal loss.')
