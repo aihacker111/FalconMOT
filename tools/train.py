@@ -853,27 +853,167 @@ def _collect_hota_frame(coll, class_names, seq_id, gt_objs, pred_tlwhs, pred_tid
         coll.add_frame(class_names[c], seq_id, gt_i[c], pr_i[c], sim)
 
 
+# @torch.inference_mode()
+# def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
+#     """Tracking validation over val sequences — HOTA metrics only.
+
+#     Uses the native class space without any class remap. GMC is disabled for
+#     speed and determinism (set_image is never called). Returns a dict with the
+#     HOTA-family scalars from hota.py (hota/deta/assa/loca/detre/assre) plus
+#     track_score (= HOTA, drives model_best) and fps.
+
+#     Speed: frame loading is pipelined across threads (overlaps disk I/O with
+#     GPU inference), the detector forward runs in fp16 autocast when
+#     --track_val_fp16 is set, and HOTA is computed in-memory (no result .txt
+#     round-trip) with a parallel TrackEval pass. A tqdm bar shows live progress.
+#     """
+#     import time
+
+#     if not (val_ann_file and val_img_root and os.path.isfile(val_ann_file)):
+#         print('[track-eval] missing val_ann/val_img -- skipping tracking eval.')
+#         return {}
+
+#     model.eval()
+#     net_w, net_h = opt.img_size
+#     ncls     = opt.num_classes
+#     min_area = getattr(opt, 'min_box_area', 100)
+#     _OFF     = 1_000_000
+
+#     postproc = FalconJDEPostProcessor(
+#         num_classes=ncls,
+#         num_top_queries=getattr(opt, 'K', 300),
+#         conf_thres=opt.conf_thres,
+#         use_focal_loss=True,
+#     )
+
+#     opt_trk = copy.copy(opt)
+#     opt_trk.num_classes = ncls
+#     tracker = MCJDETracker(opt_trk, frame_rate=getattr(opt, 'frame_rate', 30))
+
+#     src = LoadCocoSequencesForTracking(val_ann_file, val_img_root, img_size=opt.img_size)
+
+#     # ── Class names for HOTA (native class space, no remap) ─────────────────
+#     # HOTA is computed per class then class-averaged (VisDrone convention).
+#     try:
+#         from falconmot.tracker.class_remap import CLS7_NAMES, CLS5_NAMES, CLS4_NAMES
+#         _name_tables = {7: CLS7_NAMES, 5: CLS5_NAMES, 4: CLS4_NAMES}
+#     except Exception:
+#         _name_tables = {}
+#     _names_map = _name_tables.get(ncls, {})
+#     class_names = {c: _names_map.get(c, f'class_{c}') for c in range(ncls)}
+#     hota_names  = [class_names[c] for c in range(ncls)]
+#     coll = HOTACollector(hota_names)
+
+#     # ── Parse GT ONCE (instead of re-parsing the whole json per sequence) ───
+#     gt_by_seq = load_all_coco_gt(val_ann_file)
+
+#     # ── fp16 autocast for the detector forward (wires up --track_val_fp16) ──
+#     use_fp16 = bool(int(getattr(opt, 'track_val_fp16', 1))) and opt.device.type == 'cuda'
+
+#     # ── Threaded frame prefetch params (overlap disk I/O with GPU) ──────────
+#     n_threads  = int(getattr(opt, 'track_val_loader_threads', 4))
+#     prefetch   = int(getattr(opt, 'track_val_prefetch', 8))
+
+#     t0, n_frames = time.time(), 0
+
+#     total_frames = sum(src.num_frames(s) for s in src.seqs)
+#     pbar = tqdm(total=total_frames, desc='[track-eval]', unit='f', dynamic_ncols=True)
+
+#     for seq_id in src.seqs:
+#         tracker.reset()
+#         gt_frames = gt_by_seq.get(seq_id, {})
+
+#         frames = src._seq_frames[seq_id]
+#         reader = _ParallelFrameReader(frames, net_w, net_h,
+#                                       num_workers=n_threads, prefetch=prefetch)
+
+#         for frame_id, img, img0 in reader:
+#             orig_h, orig_w = img0.shape[:2]
+#             sizes = torch.tensor([[orig_h, orig_w]], device=opt.device)
+#             blob  = torch.from_numpy(img[None]).to(opt.device, non_blocking=True)
+
+#             with torch.autocast('cuda', dtype=torch.float16, enabled=use_fp16):
+#                 output = model(blob)
+#                 res = postproc(output, sizes)[0]
+
+#             dets = _defaultdict(list)
+#             if len(res['scores']) > 0:
+#                 bxs = res['boxes'].float().cpu().numpy()
+#                 scs = res['scores'].float().cpu().numpy()
+#                 lbs = res['labels'].cpu().numpy()
+#                 rid = res['reid'].float().cpu().numpy() if 'reid' in res else None
+#                 ws  = bxs[:, 2] - bxs[:, 0]
+#                 hs  = bxs[:, 3] - bxs[:, 1]
+#                 for i in np.where((ws > 0) & (hs > 0))[0]:
+#                     c = int(lbs[i])
+#                     if c < 0 or c >= ncls:
+#                         continue
+#                     tlwh = np.array([bxs[i, 0], bxs[i, 1], ws[i], hs[i]], dtype=np.float32)
+#                     emb  = rid[i] if rid is not None else np.zeros(1, dtype=np.float32)
+#                     dets[c].append(MCTrack(tlwh, float(scs[i]), emb, ncls, c))
+
+#             online = tracker.update(dets, h_orig=orig_h, w_orig=orig_w)
+
+#             tlwhs, tids = [], []
+#             for c, tracks in online.items():
+#                 for t in tracks:
+#                     w, h = t.curr_tlwh[2], t.curr_tlwh[3]
+#                     if t.track_id < 0 or (w * h) <= min_area:
+#                         continue
+#                     tlwhs.append(t.curr_tlwh)
+#                     tids.append(int(t.track_id) + c * _OFF)
+
+#             _collect_hota_frame(coll, class_names, seq_id,
+#                                 gt_frames.get(int(frame_id), []),
+#                                 tlwhs, tids, _OFF)
+#             n_frames += 1
+#             pbar.update(1)
+#             if n_frames % 20 == 0:
+#                 pbar.set_postfix_str(f'{n_frames / max(1e-6, time.time() - t0):.1f} fps')
+
+#     pbar.close()
+#     infer_elapsed = time.time() - t0   # pure inference time (excludes HOTA compute)
+#     model.train()
+
+#     if n_frames == 0:
+#         return {}
+
+#     # ── HOTA (the only metric — drives model_best selection) ────────────────
+#     hota_workers = int(getattr(opt, 'track_val_hota_workers', 0)) or min(8, os.cpu_count() or 4)
+#     try:
+#         hres = coll.compute(num_workers=hota_workers)
+#     except Exception as e:
+#         print(f'[track-eval] HOTA unavailable ({e}); install TrackEval to enable it. '
+#               f'Skipping best-model update this round.')
+#         return {'fps': n_frames / max(1e-6, infer_elapsed)}
+
+#     ov  = hres['overall']
+#     fps = n_frames / max(1e-6, infer_elapsed)
+#     out = {k.lower(): float(ov.get(k, 0.0))
+#            for k in ('HOTA', 'DetA', 'AssA', 'LocA', 'DetRe', 'AssRe')}
+#     out['track_score'] = out['hota']     # best model selected by HOTA
+#     out['fps'] = fps
+#     return out
+
+
 @torch.inference_mode()
 def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
     """Tracking validation over val sequences — HOTA metrics only.
-
-    Uses the native class space without any class remap. GMC is disabled for
-    speed and determinism (set_image is never called). Returns a dict with the
-    HOTA-family scalars from hota.py (hota/deta/assa/loca/detre/assre) plus
-    track_score (= HOTA, drives model_best) and fps.
-
-    Speed: frame loading is pipelined across threads (overlaps disk I/O with
-    GPU inference), the detector forward runs in fp16 autocast when
-    --track_val_fp16 is set, and HOTA is computed in-memory (no result .txt
-    round-trip) with a parallel TrackEval pass. A tqdm bar shows live progress.
+    Uses Plain Resize logic (no letterbox) for QAM Dense Map feeding.
     """
     import time
+    from collections import defaultdict as _defaultdict
 
     if not (val_ann_file and val_img_root and os.path.isfile(val_ann_file)):
         print('[track-eval] missing val_ann/val_img -- skipping tracking eval.')
         return {}
 
     model.eval()
+    
+    # [QUAN TRỌNG 1]: Ép mô hình xuất Dense Map (emb_map) khi đang chạy eval()
+    core_model = model.module if hasattr(model, 'module') else model
+    core_model.return_reid_dense = True  
+
     net_w, net_h = opt.img_size
     ncls     = opt.num_classes
     min_area = getattr(opt, 'min_box_area', 100)
@@ -885,6 +1025,7 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
         conf_thres=opt.conf_thres,
         use_focal_loss=True,
     )
+    # KHÔNG gọi postproc.set_net_hw() vì ta dùng Plain Resize
 
     opt_trk = copy.copy(opt)
     opt_trk.num_classes = ncls
@@ -892,8 +1033,6 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
 
     src = LoadCocoSequencesForTracking(val_ann_file, val_img_root, img_size=opt.img_size)
 
-    # ── Class names for HOTA (native class space, no remap) ─────────────────
-    # HOTA is computed per class then class-averaged (VisDrone convention).
     try:
         from falconmot.tracker.class_remap import CLS7_NAMES, CLS5_NAMES, CLS4_NAMES
         _name_tables = {7: CLS7_NAMES, 5: CLS5_NAMES, 4: CLS4_NAMES}
@@ -904,18 +1043,13 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
     hota_names  = [class_names[c] for c in range(ncls)]
     coll = HOTACollector(hota_names)
 
-    # ── Parse GT ONCE (instead of re-parsing the whole json per sequence) ───
     gt_by_seq = load_all_coco_gt(val_ann_file)
-
-    # ── fp16 autocast for the detector forward (wires up --track_val_fp16) ──
     use_fp16 = bool(int(getattr(opt, 'track_val_fp16', 1))) and opt.device.type == 'cuda'
 
-    # ── Threaded frame prefetch params (overlap disk I/O with GPU) ──────────
     n_threads  = int(getattr(opt, 'track_val_loader_threads', 4))
     prefetch   = int(getattr(opt, 'track_val_prefetch', 8))
 
     t0, n_frames = time.time(), 0
-
     total_frames = sum(src.num_frames(s) for s in src.seqs)
     pbar = tqdm(total=total_frames, desc='[track-eval]', unit='f', dynamic_ncols=True)
 
@@ -935,6 +1069,28 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
             with torch.autocast('cuda', dtype=torch.float16, enabled=use_fp16):
                 output = model(blob)
                 res = postproc(output, sizes)[0]
+                
+            tracker.set_image(img0)
+
+            # ====================================================================
+            # [QUAN TRỌNG 2]: Set Dense Map cho Tracker (Logic Plain Resize)
+            # ====================================================================
+            if 'reid_dense' in output and getattr(opt, 'use_appearance_motion', False):
+                # Tỷ lệ scale độc lập theo 2 trục X và Y
+                rx = net_w / orig_w
+                ry = net_h / orig_h
+                
+                tracker.set_dense(
+                    output['reid_dense'],  # Tensor [128, H/4, W/4]
+                    stride=output['reid_dense_stride'],
+                    ratio_x=rx, 
+                    ratio_y=ry, 
+                    pad_w=0.0, 
+                    pad_h=0.0
+                )
+            else:
+                tracker.set_dense(None, 1.0, 1.0, 1.0)
+            # ====================================================================
 
             dets = _defaultdict(list)
             if len(res['scores']) > 0:
@@ -952,6 +1108,7 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
                     emb  = rid[i] if rid is not None else np.zeros(1, dtype=np.float32)
                     dets[c].append(MCTrack(tlwh, float(scs[i]), emb, ncls, c))
 
+            # Update tracker (Không truyền dense_map vào đây nữa, vì đã gọi set_dense ở trên)
             online = tracker.update(dets, h_orig=orig_h, w_orig=orig_w)
 
             tlwhs, tids = [], []
@@ -972,13 +1129,15 @@ def run_track_eval(model, opt, val_ann_file: str, val_img_root: str) -> dict:
                 pbar.set_postfix_str(f'{n_frames / max(1e-6, time.time() - t0):.1f} fps')
 
     pbar.close()
-    infer_elapsed = time.time() - t0   # pure inference time (excludes HOTA compute)
+    infer_elapsed = time.time() - t0   
+    
+    # [QUAN TRỌNG 3]: Trả mô hình về trạng thái cũ để không sinh thừa DenseMap khi train
+    core_model.return_reid_dense = False
     model.train()
 
     if n_frames == 0:
         return {}
 
-    # ── HOTA (the only metric — drives model_best selection) ────────────────
     hota_workers = int(getattr(opt, 'track_val_hota_workers', 0)) or min(8, os.cpu_count() or 4)
     try:
         hres = coll.compute(num_workers=hota_workers)
