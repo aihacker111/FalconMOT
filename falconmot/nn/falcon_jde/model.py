@@ -14,6 +14,8 @@ ReID design (FairMOT/AMOT idea, adapted to a query-based detector):
   • Detection vs ReID are balanced by learnable uncertainty weights inside the
     criterion — not by a hard stop-gradient.
 """
+
+import math
 import torch
 import torch.nn as nn
 
