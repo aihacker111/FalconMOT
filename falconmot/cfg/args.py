@@ -683,44 +683,17 @@ class opts(object):
         self.parser.add_argument('--tucl_lambda', type=float, default=0.05,
                                  help='weight of the -log(w) anti-collapse regulariser.')
  
-        self.parser.add_argument('--cls_loss', default='mal',
-                             choices=['mal', 'vfl', 'focal'],
-                             help="Classification loss: mal (DEIM), vfl (raw IoU target), focal")
         # -- Merge train + val into a single training set --
         self.parser.add_argument('--merge_val_into_train', action='store_true', default=False,
                                  help='Merge both train_ann/img and val_ann/img (from data_cfg) into '
                                       'the training set. image_id/seq_id/track_id are offset to avoid '
                                       'collisions. Note: no separate val set remains for evaluation.')
         # ── ReID head ────────────────────────────────────────────────────
-        self.parser.add_argument('--reid_head_type', default='transformer',
-                                 choices=['transformer', 'context_aware', 'mlp'],
-                                 help='DEPRECATED / ignored — a single ReID head is always used.')
         self.parser.add_argument('--reid_num_points', type=int, default=8,
                                  help='number of deformable sample points per box for the ReID head')
         self.parser.add_argument('--reid_grad_scale', type=float, default=0.1,
                                  help='strength of the ReID gradient flowing into the trunk via the feature map '
                                       '(1.0 = full JDE coupling; lower to ~0.1 if detection gets noisy).')
- 
-        # ── TOD-Head: Task-Orthogonal Deformable Head ──────────────────────
-        self.parser.add_argument('--use_tod', action='store_true', default=False,
-                                 help='Enable the Task-Orthogonal Deformable ReID head '
-                                      '(Siamese task queries + guided-anchor box-shrink + orthogonal loss).')
-        self.parser.add_argument('--reid_box_shrink', type=float, default=0.5,
-                                 help='TOD: shrink factor for (w,h) of the detached box that guides '
-                                      'ReID deformable sampling (keeps points inside the object interior). '
-                                      '1.0 = no shrink.')
-        self.parser.add_argument('--ortho_dim', type=int, default=None,
-                                 help='TOD: dimension of the orthogonality comparison sub-space '
-                                      '(default = reid_dim).')
-        self.parser.add_argument('--ortho_weight', type=float, default=0.1,
-                                 help='TOD: lambda_ortho — weight of the orthogonal feature loss.')
-        self.parser.add_argument('--ortho_mode', type=str, default='channel',
-                                 choices=['channel', 'instance', 'paper', 'hybrid'],
-                                 help='TOD: orthogonal loss formulation. channel=decorrelate filter '
-                                      'channels (recommended), instance=per-object cosine^2, '
-                                      'paper=literal normalised-Gram Frobenius^2, hybrid=instance+channel.')
-        self.parser.add_argument('--ortho_warmup_epochs', type=int, default=0,
-                                 help='TOD: linearly ramp lambda_ortho over the first N epochs (0 = off).')
  
         # Pretrained / spatial size
         self.parser.add_argument('--deim_pretrained', default='',
@@ -728,19 +701,6 @@ class opts(object):
         self.parser.add_argument('--eval_spatial_size', type=int, nargs=2,
                                  default=[480, 864], help='[H, W] for anchor pre-generation')
 
-        # ── Two-phase legacy (kept for compatibility) ───────────────────────
-        self.parser.add_argument('--reid_warmup_epochs', type=int, default=0,
-                                help='Legacy Phase 0: number of epochs training only reid_head + classifiers. '
-                                    'Prefer using --train_reid_only for strict Stage 2.')
-        self.parser.add_argument('--reid_warmup_lr', type=float, default=-1.0,
-                                help='LR for Phase 0/Stage 2 (-1 = use --lr).')
-        self.parser.add_argument('--keep_backbone_frozen', action='store_true', default=False,
-                                help='Keep backbone frozen (recommended when joint tuning).')
-        self.parser.add_argument('--unfreeze_backbone', dest='keep_backbone_frozen',
-                                action='store_false')
-        self.parser.add_argument('--id_warmup_epochs', type=int, default=0,
-                                help='Ramp id_weight 0->id_weight over the first N epochs.')
-        
         # ── Input resolution ───────────────────────────────────────────────
         self.parser.add_argument('--input-wh', type=int, nargs=2, default=[864, 480],
                                  help='network input W H')
@@ -780,20 +740,12 @@ class opts(object):
         self.parser.add_argument('--grad_accum', type=int, default=1,
                                  help='gradient accumulation steps')
         self.parser.add_argument('--num_iters', type=int, default=-1)
-        self.parser.add_argument('--trainval', action='store_true')
  
         # ── Augmentation ───────────────────────────────────────────────────
         self.parser.add_argument('--stop_epoch', type=int, default=-1,
                                  help='epoch to disable aug (-1 = always on)')
-        self.parser.add_argument('--copy_paste', action='store_true', default=False)
-        self.parser.add_argument('--copy_paste_prob', type=float, default=0.5)
-        self.parser.add_argument('--copy_paste_max_area', type=float, default=0.01)
-        self.parser.add_argument('--copy_paste_n', type=int, default=5)
         self.parser.add_argument('--mosaic', action='store_true', default=False)
         self.parser.add_argument('--mosaic_prob', type=float, default=0.5)
-        self.parser.add_argument('--mosaic_scale_bias_prob', type=float, default=0.5)
-        self.parser.add_argument('--mosaic_scale_min', type=float, default=0.3)
-        self.parser.add_argument('--mosaic_scale_max', type=float, default=0.6)
  
         # ── Dataset config ─────────────────────────────────────────────────
         self.parser.add_argument('--data_cfg', type=str,
@@ -854,30 +806,22 @@ class opts(object):
         self.parser.add_argument('--reid_dim', type=int, default=128)
         self.parser.add_argument('--reid_cls_ids', default='0,1,2,3,4,5,6,7,8,9')
  
-        # -- Tracking source from COCO (consistent with training/val) --
-        self.parser.add_argument('--track_from_coco', action='store_true', default=False,
-                                help='read images + seq/frame list from COCO JSON instead of '
-                                    'the raw test_dev/sequences (matches the training preprocessing)')
-        self.parser.add_argument('--track_ann_file', type=str, default='',
-                                help='COCO JSON annotation for tracking; empty -> use val_ann from data_cfg')
-        self.parser.add_argument('--track_img_root', type=str, default='',
-                                help='image directory matching track_ann_file; empty -> use val_img from data_cfg')
-        self.parser.add_argument('--track_gt_root', type=str, default='',
-                                help='directory of raw VisDrone annotations for the tracking split '
-                                    '(e.g. .../VisDrone2019-MOT-val/annotations) used by the Evaluator to build GT')
-        
         # ── Tracking inference ─────────────────────────────────────────────
-        self.parser.add_argument('--eval_mode', type=str, default='10class',
-                                 choices=['10class', '5class', '4class',
-                                          '5class_merge_benchmark',
-                                          '5class_merge_competition'],
-                                 help='Evaluation class subset')
         self.parser.add_argument('--K', type=int, default=300,
                                  help='max detections per image at inference')
         self.parser.add_argument('--conf_thres', type=float, default=0.4,
                                  help='detection confidence threshold')
-        self.parser.add_argument('--track_buffer', type=int, default=30)
-        
+        self.parser.add_argument('--track_buffer', type=int, default=30,
+                                 help='frames a lost track is kept alive')
+        self.parser.add_argument('--frame_rate', type=int, default=30,
+                                 help='assumed frame rate for the tracker (buffer = frame_rate/30 * track_buffer).')
+        self.parser.add_argument('--min-box-area', type=float, default=100,
+                                 help='filter boxes smaller than this area (px²)')
+        self.parser.add_argument('--track_ann_file', type=str, default='',
+                                 help='COCO JSON annotation for the tracking split (eval_mot_* tools); '
+                                      'empty -> tool default')
+        self.parser.add_argument('--track_img_root', type=str, default='',
+                                 help='image directory matching track_ann_file; empty -> tool default')
         # ── Query Appearance-Motion (QAM) association ──
         self.parser.add_argument('--use_appearance_motion', action='store_true',
                                  help='enable appearance-as-motion association')
@@ -900,9 +844,10 @@ class opts(object):
         self.parser.add_argument('--motion_gate', type=float, default=0.9,
                                  help='motion-distance spatial gate')
 
-        # -- Tracking-metric validation (select model_best by IDF1/MOTA) --
-        self.parser.add_argument('--track_val', action='store_true',
-                                 help='enable tracking validation to select model_best instead of COCO mAP.')
+        # ── Tracking validation during training (MOTA / IDF1) ───────────────
+        # Runs automatically every --track_val_intervals epochs (stage-2/joint)
+        # whenever val_cfg provides val sequences; model_best.pth is selected by
+        # track_score = (w_idf1*IDF1 + w_mota*MOTA) / (w_idf1 + w_mota).
         self.parser.add_argument('--track_val_intervals', type=int, default=1,
                                  help='run tracking eval every N epochs (0 = use --val_intervals).')
         self.parser.add_argument('--track_val_fp16', type=int, default=1,
@@ -912,42 +857,16 @@ class opts(object):
                                       '(overlaps disk I/O with GPU inference).')
         self.parser.add_argument('--track_val_prefetch', type=int, default=8,
                                  help='number of frames read ahead per sequence during track eval.')
-        self.parser.add_argument('--track_val_hota_workers', type=int, default=0,
-                                 help='threads for the final HOTA TrackEval pass over (class,seq) '
-                                      'jobs. 0 = auto (min(8, cpu_count)).')
-        self.parser.add_argument('--track_val_in_phase0', action='store_true',
-                                 help='also run tracking eval during Phase 0 / Stage 2.')
         self.parser.add_argument('--track_val_w_idf1', type=float, default=0.6,
-                                 help='IDF1 weight in track_score = w_idf1*IDF1 + w_mota*MOTA.')
+                                 help='IDF1 weight in track_score.')
         self.parser.add_argument('--track_val_w_mota', type=float, default=0.4,
                                  help='MOTA weight in track_score.')
-        self.parser.add_argument('--frame_rate', type=int, default=30,
-                                 help='assumed frame rate for the tracker (buffer = frame_rate/30 * track_buffer).')
 
-        # ── Tracker (FusionTrack-inspired, inference-only) ───────────────
-        self.parser.add_argument('--reid_decay_alpha', type=float, default=0.02,
-                                 help='time-decay rate for gallery ReID memory (W=e^{-alpha*dt}); 0 = no decay')
-        self.parser.add_argument('--w_iou_hi', type=float, default=0.5,
-                                 help='IoU weight when GMC is reliable (small camera motion)')
-        self.parser.add_argument('--w_iou_lo', type=float, default=0.3,
-                                 help='IoU weight when GMC is unreliable (large camera motion)')
-        self.parser.add_argument('--gmc_band_lo', type=float, default=20.0,
-                                 help='||translation|| at which w_iou starts to decrease (ramp lower bound)')
-        self.parser.add_argument('--gmc_band_hi', type=float, default=40.0,
-                                 help='||translation|| at which w_iou reaches w_iou_lo (ramp upper bound)')
-        self.parser.add_argument('--min-box-area', type=float, default=100,
-                                 help='filter boxes smaller than this area (px²)')
-        self.parser.add_argument('--test_visdrone', default=True)
-        self.parser.add_argument('--test_uavdt',    default=False)
+        # ── ReID dense map (stride-4) ───────────────────────────────────────
         self.parser.add_argument('--reid_use_s4_dense', action='store_true',
                       help='Dense ReID map at stride-4 (small objects). Requires c1=_s4_feat.')
-        self.parser.add_argument('--reid_w_dense_ce', type=float, default=1.0)
-        self.parser.add_argument('--reid_w_cons',     type=float, default=0.5)
         self.parser.add_argument('--reid_lr_factor', type=float, default=1.0)
         
-        # ── Distributed ────────────────────────────────────────────────────
-        self.parser.add_argument('--local-rank', type=int, default=0)
- 
     def parse(self, args=''):
         opt = self.parser.parse_args() if args == '' else self.parser.parse_args(args)
  
@@ -957,9 +876,6 @@ class opts(object):
  
         if opt.lr_drop < 0:
             opt.lr_drop = opt.num_epochs
- 
-        if opt.trainval:
-            opt.val_intervals = 100_000_000
  
         if opt.master_batch_size == -1:
             opt.master_batch_size = opt.batch_size // len(opt.gpus)
@@ -987,8 +903,6 @@ class opts(object):
             opt.use_reid           = False
             opt.id_weight          = 0.0
             opt.temporal_mosaic    = False
-            opt.reid_warmup_epochs = 0
-            opt.id_warmup_epochs   = 0
             s4_tag = '+s4_aux' if (getattr(opt, 'use_s4', False) and getattr(opt, 'use_s4_aux', True)) else ''
             print('[train_single_det] STAGE 1 (Detection-only): '
                   f'ReID head OFF | losses: cls+bbox+giou{s4_tag} | '
