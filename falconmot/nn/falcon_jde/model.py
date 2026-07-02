@@ -471,6 +471,7 @@ class FalconJDEModel(nn.Module):
                 num_heads=8, num_points=reid_num_points,
                 use_s4_dense=reid_use_s4_dense,
                 s4_in_ch=reid_s4_in_ch,
+                use_context_layer=False,
                 detach_input=True # [NOVELTY 1]: Bức tường lửa (Gradient Isolation), ép ngắt đạo hàm ReID lan về Backbone
             )
             
