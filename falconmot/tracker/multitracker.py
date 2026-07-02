@@ -380,65 +380,210 @@ class MCJDETracker(object):
         self.frame_id = 0
         self.kalman_filter = KalmanFilter()
 
-    def remove_cross_class_duplicates(self, tracked_dict, lost_dict, iou_thresh=0.70):
+    def remove_cross_class_duplicates(self, tracked_dict, lost_dict, iou_thresh=0.75):
         """
-        Duyệt qua toàn bộ các track của tất cả các lớp để tìm các track bị trùng lặp không gian (IoU cao).
-        Nếu hai track thuộc hai lớp khác nhau trùng nhau, giữ lại track có thời gian sống lâu hơn (track_len)
-        hoặc đang có detection thực tế gánh (Tracked thắng Lost).
+        Loại bỏ các Bounding Box đè nhau giữa các Class khác nhau để tăng MOTA,
+        nhưng giữ lại Track ngầm (đẩy vào Lost) để bảo vệ IDF1 khỏi hiện tượng Class Flickering.
         """
         all_tracks = []
-        # Thu thập toàn bộ track đang hoạt động
+        # Chỉ xét những track thực sự đang hiện diện (Tracked) trên màn hình ở frame này
         for cls_id in tracked_dict.keys():
             for t in tracked_dict[cls_id]:
-                if t.is_activated:
-                    all_tracks.append(t)
-            for t in lost_dict[cls_id]:
-                if t.is_activated:
+                if t.is_activated and t.state == TrackState.Tracked:
                     all_tracks.append(t)
 
         if len(all_tracks) < 2:
             return
 
-        # Tính toán ma trận khoảng cách IoU giữa tất cả các track
-        # Sử dụng hàm iou_distance đã có trong file matching.py
         from falconmot.tracker import matching
         dists = matching.iou_distance(all_tracks, all_tracks)
         
-        # Tìm các cặp trùng lặp (IoU > thresh tương đương dist < 1 - thresh)
+        # Tìm các cặp đè nhau (IoU > thresh)
         pairs = np.where(dists < (1.0 - iou_thresh))
         
         for i, j in zip(pairs[0], pairs[1]):
-            if i >= j: # Tránh trùng lặp cặp (i,j) và (j,i) hoặc chính nó
+            if i >= j: 
                 continue
                 
             t1 = all_tracks[i]
             t2 = all_tracks[j]
             
-            # Nếu trùng lớp thì hàm nội bộ lớp đã xử lý rồi, ta chỉ xử lý lệch lớp
+            # Chỉ xử lý nếu 2 track khác Class
             if t1.cls_id == t2.cls_id:
                 continue
                 
-            # Tiêu chí loại bỏ: ưu tiên track đang ở trạng thái Tracked hơn Lost, 
-            # nếu cùng trạng thái thì ưu tiên track có chiều dài lịch sử (track_len) lớn hơn
-            if t1.state == 1 and t2.state == 2: # t1 Tracked, t2 Lost
+            # Đảm bảo cả 2 chưa bị xử lý bởi vòng lặp trước đó
+            if t1.state != TrackState.Tracked or t2.state != TrackState.Tracked:
+                continue
+                
+            # LUẬT 1: Bảo vệ Track trưởng thành (Chống nhiễu chớp nhoáng)
+            if t1.track_len > 3 and t2.track_len <= 2:
                 t2.mark_removed()
-            elif t2.state == 1 and t1.state == 2: # t2 Tracked, t1 Lost
+                continue
+            elif t2.track_len > 3 and t1.track_len <= 2:
                 t1.mark_removed()
+                continue
+
+            # LUẬT 2: Soft Suppression dựa trên Score (Bảo vệ IDF1)
+            if t1.score >= t2.score:
+                t2.mark_lost() # Tạm thời ẩn t2 đi, không xóa vĩnh viễn
             else:
-                if t1.track_len >= t2.track_len:
-                    t2.mark_removed()
-                else:
-                    t1.mark_removed()
+                t1.mark_lost() # Tạm thời ẩn t1 đi, không xóa vĩnh viễn
 
+    # def update(self, dets_per_class, h_orig, w_orig):
+    #     """Run one tracking step.
+
+    #     Args:
+    #         dets_per_class : dict[cls_id] -> list[MCTrack] high-conf detections
+    #         h_orig, w_orig : original image height / width
+    #     Returns:
+    #         dict[cls_id] -> list[MCTrack] of active output tracks
+    #     """
+    #     self.frame_id += 1
+    #     if self.frame_id == 1:
+    #         MCTrack.init_count(self.num_classes)
+
+    #     activated_tracks_dict = defaultdict(list)
+    #     refined_tracks_dict = defaultdict(list)
+    #     lost_tracks_dict = defaultdict(list)
+    #     removed_tracks_dict = defaultdict(list)
+    #     output_tracks_dict = defaultdict(list)
+
+    #     # Global motion compensation — computed once per frame.
+    #     gmc_H = None
+    #     if self._curr_img is not None:
+    #         try:
+    #             gmc_result = self.gmc.apply(self._curr_img, None)
+    #             gmc_H = gmc_result[0] if isinstance(gmc_result, tuple) else gmc_result
+    #         except Exception:
+    #             gmc_H = None
+
+    #     for cls_id in range(self.num_classes):
+    #         cls_detects = dets_per_class.get(cls_id, [])
+
+    #         unconfirmed_dict = defaultdict(list)
+    #         tracked_tracks_dict = defaultdict(list)
+    #         for track in self.tracked_tracks_dict[cls_id]:
+    #             if not track.is_activated:
+    #                 unconfirmed_dict[cls_id].append(track)
+    #             else:
+    #                 tracked_tracks_dict[cls_id].append(track)
+
+    #         MCTrack.multi_predict(self.lost_tracks_dict[cls_id])
+    #         MCTrack.multi_predict(tracked_tracks_dict[cls_id])
+
+    #         track_pool_dict = defaultdict(list)
+    #         track_pool_dict[cls_id] = join_tracks(
+    #             tracked_tracks_dict[cls_id], self.lost_tracks_dict[cls_id])
+
+    #         if gmc_H is not None:
+    #             MCTrack.multi_gmc(track_pool_dict[cls_id], gmc_H)
+    #             MCTrack.multi_gmc(unconfirmed_dict[cls_id], gmc_H)
+
+    #         # Sample value-space appearance templates for detections (QAM).
+    #         if self.use_am and self._dense_raw is not None:
+    #             self._sample_det_templates(cls_detects)
+
+    #         # --- Step 1: first association — appearance + IoU (+ motion) ---
+    #         pool = track_pool_dict[cls_id]
+    #         emb_d = matching.embedding_distance(pool, cls_detects)
+    #         iou_d = matching.iou_distance(pool, cls_detects)
+
+    #         if self.legacy_fuse or not self.use_am:
+    #             cost = matching.fuse_score_three(iou_d, emb_d, cls_detects)
+    #             thr  = 0.6
+    #         else:
+    #             d_mot, w_mot = None, None
+    #             if self._dense_hat is not None and len(pool) > 0 and len(cls_detects) > 0:
+    #                 d_mot, w_mot = self._appearance_motion(pool, cls_detects)
+    #             cost = matching.fuse_loglik(
+    #                 emb_d, iou_d, d_mot, w_mot,
+    #                 w_app=self.w_app, w_iou=self.w_iou,
+    #                 proximity_gate=self.proximity_gate, motion_gate=self.motion_gate)
+    #             thr  = self.match_thresh
+    #         matches, u_track, u_detection = matching.linear_assignment(cost, thresh=thr)
+
+    #         for i_tracked, i_det in matches:
+    #             track = track_pool_dict[cls_id][i_tracked]
+    #             det = cls_detects[i_det]
+    #             if track.state == TrackState.Tracked:
+    #                 track.update(det, self.frame_id)
+    #                 activated_tracks_dict[cls_id].append(track)
+    #             else:
+    #                 track.re_activate(det, self.frame_id, new_id=False)
+    #                 refined_tracks_dict[cls_id].append(track)
+
+    #         # --- Step 2: second association — IoU only ---
+    #         cls_detects_r = [cls_detects[i] for i in u_detection]
+    #         r_tracked_tracks = [track_pool_dict[cls_id][i]
+    #                             for i in u_track if track_pool_dict[cls_id][i].state]
+    #         dist_iou = matching.iou_distance(r_tracked_tracks, cls_detects_r)
+    #         matches, u_track, u_detection = matching.linear_assignment(dist_iou, thresh=0.8)
+
+    #         for i_tracked, i_det in matches:
+    #             track = r_tracked_tracks[i_tracked]
+    #             det = cls_detects_r[i_det]
+    #             if track.state == TrackState.Tracked:
+    #                 track.update(det, self.frame_id)
+    #                 activated_tracks_dict[cls_id].append(track)
+    #             else:
+    #                 track.re_activate(det, self.frame_id, new_id=False)
+    #                 refined_tracks_dict[cls_id].append(track)
+
+    #         # Tracks still unmatched after step 2 -> mark lost.
+    #         for it in u_track:
+    #             track = r_tracked_tracks[it]
+    #             if track.state != TrackState.Lost:
+    #                 track.mark_lost()
+    #                 lost_tracks_dict[cls_id].append(track)
+
+    #         # --- Unconfirmed tracks (only one beginning frame) ---
+    #         cls_detects_unc = [cls_detects_r[i] for i in u_detection]
+    #         dist_iou = matching.iou_distance(unconfirmed_dict[cls_id], cls_detects_unc)
+    #         matches, u_unconfirmed, u_detection = matching.linear_assignment(dist_iou, thresh=0.5)
+
+    #         for i_tracked, i_det in matches:
+    #             unconfirmed_dict[cls_id][i_tracked].update(cls_detects_unc[i_det], self.frame_id)
+    #             activated_tracks_dict[cls_id].append(unconfirmed_dict[cls_id][i_tracked])
+    #         for it in u_unconfirmed:
+    #             unconfirmed_dict[cls_id][it].mark_removed()
+    #             removed_tracks_dict[cls_id].append(unconfirmed_dict[cls_id][it])
+
+    #         # --- Initialise new tracks ---
+    #         for i_new in u_detection:
+    #             track = cls_detects_unc[i_new]
+    #             if track.score < self.det_thresh:
+    #                 continue
+    #             track.activate(self.kalman_filter, self.frame_id)
+    #             activated_tracks_dict[cls_id].append(track)
+
+    #         # --- Age out lost tracks ---
+    #         for track in self.lost_tracks_dict[cls_id]:
+    #             if self.frame_id - track.end_frame > self.max_time_lost:
+    #                 track.mark_removed()
+    #                 removed_tracks_dict[cls_id].append(track)
+
+    #         # --- Bookkeeping ---
+    #         self.tracked_tracks_dict[cls_id] = [
+    #             t for t in self.tracked_tracks_dict[cls_id] if t.state == TrackState.Tracked]
+    #         self.tracked_tracks_dict[cls_id] = join_tracks(
+    #             join_tracks(self.tracked_tracks_dict[cls_id], activated_tracks_dict[cls_id]),
+    #             refined_tracks_dict[cls_id])
+    #         self.lost_tracks_dict[cls_id] = sub_tracks(
+    #             self.lost_tracks_dict[cls_id], self.tracked_tracks_dict[cls_id])
+    #         self.lost_tracks_dict[cls_id].extend(lost_tracks_dict[cls_id])
+    #         self.lost_tracks_dict[cls_id] = sub_tracks(
+    #             self.lost_tracks_dict[cls_id], self.removed_tracks_dict[cls_id])
+    #         self.removed_tracks_dict[cls_id].extend(removed_tracks_dict[cls_id])
+    #         self.tracked_tracks_dict[cls_id], self.lost_tracks_dict[cls_id] = \
+    #             remove_duplicate_tracks(self.tracked_tracks_dict[cls_id],
+    #                                     self.lost_tracks_dict[cls_id])
+    #         output_tracks_dict[cls_id] = [
+    #             t for t in self.tracked_tracks_dict[cls_id] if t.is_activated]
+            
+    #     return output_tracks_dict
     def update(self, dets_per_class, h_orig, w_orig):
-        """Run one tracking step.
-
-        Args:
-            dets_per_class : dict[cls_id] -> list[MCTrack] high-conf detections
-            h_orig, w_orig : original image height / width
-        Returns:
-            dict[cls_id] -> list[MCTrack] of active output tracks
-        """
+        """Run one tracking step."""
         self.frame_id += 1
         if self.frame_id == 1:
             MCTrack.init_count(self.num_classes)
@@ -447,7 +592,6 @@ class MCJDETracker(object):
         refined_tracks_dict = defaultdict(list)
         lost_tracks_dict = defaultdict(list)
         removed_tracks_dict = defaultdict(list)
-        output_tracks_dict = defaultdict(list)
 
         # Global motion compensation — computed once per frame.
         gmc_H = None
@@ -569,18 +713,43 @@ class MCJDETracker(object):
             self.tracked_tracks_dict[cls_id] = join_tracks(
                 join_tracks(self.tracked_tracks_dict[cls_id], activated_tracks_dict[cls_id]),
                 refined_tracks_dict[cls_id])
+            
             self.lost_tracks_dict[cls_id] = sub_tracks(
                 self.lost_tracks_dict[cls_id], self.tracked_tracks_dict[cls_id])
             self.lost_tracks_dict[cls_id].extend(lost_tracks_dict[cls_id])
             self.lost_tracks_dict[cls_id] = sub_tracks(
                 self.lost_tracks_dict[cls_id], self.removed_tracks_dict[cls_id])
+            
             self.removed_tracks_dict[cls_id].extend(removed_tracks_dict[cls_id])
+            
             self.tracked_tracks_dict[cls_id], self.lost_tracks_dict[cls_id] = \
                 remove_duplicate_tracks(self.tracked_tracks_dict[cls_id],
                                         self.lost_tracks_dict[cls_id])
-            self.remove_cross_class_duplicates(self.tracked_tracks_dict, self.lost_tracks_dict, iou_thresh=0.75)
+
+        # =====================================================================
+        # [NOVELTY]: Re-Bookkeeping Đa Lớp (Cross-Class)
+        # Thực hiện SAU KHI đã tổng hợp đủ Tracks từ TẤT CẢ các Classes
+        # =====================================================================
+        self.remove_cross_class_duplicates(self.tracked_tracks_dict, self.lost_tracks_dict, iou_thresh=0.75)
+        
+        output_tracks_dict = defaultdict(list)
+        for cls_id in range(self.num_classes):
+            new_tracked = []
+            for t in self.tracked_tracks_dict[cls_id]:
+                # Tái phân bổ các Track vừa bị ép ngầm (mark_lost/mark_removed) về đúng chỗ
+                if t.state == TrackState.Tracked:
+                    new_tracked.append(t)
+                elif t.state == TrackState.Lost:
+                    self.lost_tracks_dict[cls_id].append(t)
+                elif t.state == TrackState.Removed:
+                    self.removed_tracks_dict[cls_id].append(t)
+            
+            self.tracked_tracks_dict[cls_id] = new_tracked
+            
+            # Xuất kết quả cuối cùng (Loại bỏ triệt để Ghost Output)
             output_tracks_dict[cls_id] = [
-                t for t in self.tracked_tracks_dict[cls_id] if t.is_activated]
+                t for t in self.tracked_tracks_dict[cls_id] if t.is_activated and t.state == TrackState.Tracked
+            ]
             
         return output_tracks_dict
 
