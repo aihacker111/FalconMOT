@@ -857,6 +857,10 @@ class opts(object):
                                       '(overlaps disk I/O with GPU inference).')
         self.parser.add_argument('--track_val_prefetch', type=int, default=8,
                                  help='number of frames read ahead per sequence during track eval.')
+        self.parser.add_argument('--track_val_gmc', type=int, default=0,
+                                 help='run GMC (camera-motion compensation) during tracking eval. '
+                                      'Default 0: GMC is serial CPU optical flow (~5-15 ms/frame) '
+                                      'and stalls the GPU; enable only if val has strong camera motion.')
         self.parser.add_argument('--track_val_w_idf1', type=float, default=0.6,
                                  help='IDF1 weight in track_score.')
         self.parser.add_argument('--track_val_w_mota', type=float, default=0.4,
