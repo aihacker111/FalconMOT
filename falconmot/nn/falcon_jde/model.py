@@ -472,7 +472,7 @@ class FalconJDEModel(nn.Module):
                 use_s4_dense=reid_use_s4_dense,
                 s4_in_ch=reid_s4_in_ch,
                 use_context_layer=False,
-                detach_input=True # [NOVELTY 1]: Bức tường lửa (Gradient Isolation), ép ngắt đạo hàm ReID lan về Backbone
+                detach_input=False # [NOVELTY 1]: Bức tường lửa (Gradient Isolation), ép ngắt đạo hàm ReID lan về Backbone
             )
             
             # ---------------------------------------------------------
@@ -533,9 +533,16 @@ class FalconJDEModel(nn.Module):
             reid_query = self.reid_prompts.weight.unsqueeze(0).expand(B, -1, -1)
 
             # Truyền ReID Prompts vào làm query cho mạng lấy mẫu (Deformable Attention)
+            # reid_out = self.reid_head(
+            #     query=reid_query,             # <--- Đổi `hs.detach()` thành `reid_query`
+            #     boxes=pred_boxes.detach(),    # Tọa độ Box vẫn giữ nguyên (làm reference points)
+            #     reid_feat=reid_feat,
+            #     c1=c1, 
+            #     return_dense=want_dense,
+            # )
             reid_out = self.reid_head(
                 query=reid_query,             # <--- Đổi `hs.detach()` thành `reid_query`
-                boxes=pred_boxes.detach(),    # Tọa độ Box vẫn giữ nguyên (làm reference points)
+                boxes=pred_boxes,    # Tọa độ Box vẫn giữ nguyên (làm reference points)
                 reid_feat=reid_feat,
                 c1=c1, 
                 return_dense=want_dense,
