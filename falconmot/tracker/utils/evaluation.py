@@ -1,6 +1,11 @@
 import os
 import numpy as np
 import copy
+
+# NumPy 2.x compat: motmetrics (<=1.4.0) still uses np.asfarray (removed in 2.0).
+if not hasattr(np, 'asfarray'):
+    np.asfarray = lambda a, dtype=np.float64: np.asarray(a, dtype=dtype)
+
 import motmetrics as mm
 mm.lap.default_solver = 'lap'
 

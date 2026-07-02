@@ -170,6 +170,12 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
+# ── NumPy 2.x compatibility ─────────────────────────────────────────────────
+# motmetrics (<=1.4.0) still calls np.asfarray, removed in NumPy 2.0.
+# Restore it as a thin alias so mm.distances.iou_matrix keeps working.
+if not hasattr(np, 'asfarray'):
+    np.asfarray = lambda a, dtype=np.float64: np.asarray(a, dtype=dtype)
+
 # Must match _CLS_ID_OFFSET in track_ECDet.py and io.py
 _CLS_ID_OFFSET = 1_000_000
 
