@@ -129,6 +129,7 @@ class FalconJDECriterion(nn.Module):
         use_tucl:            bool  = False,    # uncertainty-weighted ReID (T-UCL)
         tucl_lambda:         float = 0.05,    # weight of the -log(w) regulariser
         use_entropy_aux:     bool  = False,   # supervise the SAFA entropy scorer
+        decorr_weight:       float = 0.02,    # [OSD] cross-covariance penalty weight
     ):
         super().__init__()
         self.matcher             = matcher
@@ -169,6 +170,7 @@ class FalconJDECriterion(nn.Module):
         self.use_tucl            = use_tucl
         self.tucl_lambda         = tucl_lambda
         self.use_entropy_aux     = use_entropy_aux
+        self.decorr_weight       = decorr_weight
 
         self.weight_dict = weight_dict or {
             'loss_mal':  1.0,
@@ -500,116 +502,6 @@ class FalconJDECriterion(nn.Module):
         if n_active > 1:
             reid_loss = reid_loss / n_active
         return {'loss_reid': reid_loss}
-    # def loss_reid(self, outputs, targets, indices) -> dict:
-    #     """Per-class ReID: Pure CrossEntropy + Dense Alignment.
-    #     Uses Instance-balanced Loss and removes ArcFace/Triplet overhead.
-    #     """
-    #     if 'pred_reid' not in outputs:
-    #         return {}
-    #     am_tau = outputs['am_tau']
-    #     pred_reid = outputs['pred_reid']                       # (B,N,D) post-neck
-    #     pred_reid_map = outputs.get('pred_reid_map', None)       # (B,D,H,W) | None
-    #     dev = pred_reid.device
-        
-    #     reid_loss = pred_reid.sum() * 0.0
-    #     total_valid_instances = 0  # [CẢI TIẾN 2]: Tính tổng số instance để chia trung bình
-
-    #     # T-UCL: per-query location/quality estimate w_i = sigmoid(LQE-refined score).
-    #     quality_map = None
-    #     if self.use_tucl and 'pred_logits' in outputs:
-    #         quality_map = outputs['pred_logits'].sigmoid().amax(dim=-1).detach()  # (B,N)
-
-    #     cls_emb       = {c: [] for c in self.nid_dict}
-    #     cls_emb_dense = {c: [] for c in self.nid_dict}
-    #     cls_emb_app   = {c: [] for c in self.nid_dict}
-    #     cls_ids       = {c: [] for c in self.nid_dict}
-    #     cls_w         = {c: [] for c in self.nid_dict}
-    #     pred_reid_app = outputs.get('pred_reid_app', None)
-
-    #     for b_idx, (src_idx, tgt_idx) in enumerate(indices):
-    #         if len(src_idx) == 0:
-    #             continue
-    #         t = targets[b_idx]
-    #         src_idx, tgt_idx = src_idx.to(dev), tgt_idx.to(dev)
-    #         labels = t['labels'].to(dev)[tgt_idx]
-    #         tids = t['track_ids'].to(dev)[tgt_idx]
-    #         valid = tids >= 0
-    #         if not valid.any():
-    #             continue
-
-    #         src_v = src_idx[valid]
-    #         emb_b = pred_reid[b_idx][src_v]
-    #         app_b = pred_reid_app[b_idx][src_v] if pred_reid_app is not None else None
-    #         lbl_b = labels[valid]
-    #         ids_b = tids[valid]
-    #         w_b = quality_map[b_idx][src_v] if quality_map is not None else None
-
-    #         dense_b = None
-    #         if pred_reid_map is not None:
-    #             centers = t['boxes'].to(dev)[tgt_idx][valid][:, :2]
-    #             dense_b = self._sample_emb_map(pred_reid_map[b_idx], centers)
-
-    #         for cls_id in self.nid_dict:
-    #             mask = (lbl_b == cls_id)
-    #             if not mask.any():
-    #                 continue
-    #             cls_emb[cls_id].append(emb_b[mask])
-    #             if app_b is not None:
-    #                 cls_emb_app[cls_id].append(app_b[mask])
-    #             cls_ids[cls_id].append(ids_b[mask])
-    #             if w_b is not None:
-    #                 cls_w[cls_id].append(w_b[mask])
-    #             if dense_b is not None:
-    #                 cls_emb_dense[cls_id].append(dense_b[mask])
-
-    #     # Bắt đầu tính Loss
-    #     for cls_id in self.nid_dict:
-    #         if not cls_emb[cls_id]:
-    #             continue
-            
-    #         emb = torch.cat(cls_emb[cls_id], dim=0)
-    #         ids = torch.cat(cls_ids[cls_id], dim=0)
-            
-    #         num_instances = ids.size(0)
-    #         total_valid_instances += num_instances
-
-    #         # Linear classification (FairMOT style)
-    #         emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
-    #         logits = self.linear_classifiers[str(cls_id)](emb_id)
-    #         logits = logits / am_tau
-            
-    #         if self.use_tucl and cls_w[cls_id]:
-    #             # T-UCL: down-weight unreliable (small/blurry) samples
-    #             w = torch.cat(cls_w[cls_id], dim=0).clamp(1e-4, 1.0)
-    #             ce_i = F.cross_entropy(logits, ids, ignore_index=-1, reduction='none')
-    #             class_loss = (w * ce_i).sum() # Sum thay vì mean, để chia cho tổng instance ở cuối
-    #         else:
-    #             # [CẢI TIẾN 2]: Nhân với số lượng mẫu để bảo toàn trọng lượng
-    #             class_loss = self.ce_loss(logits, ids) * num_instances
-                
-    #         reid_loss = reid_loss + class_loss
-
-    #         # Dense CE + consistency with the sparse embedding
-    #         if cls_emb_dense[cls_id]:
-    #             dense = torch.cat(cls_emb_dense[cls_id], dim=0)
-    #             emb_id_d = self.emb_scale_dict[cls_id] * F.normalize(dense, dim=1)
-    #             logits_d = self.linear_classifiers[str(cls_id)](emb_id_d)
-    #             logits_d = logits_d / am_tau
-                
-    #             dense_loss = self.ce_loss(logits_d, ids) * num_instances
-    #             reid_loss = reid_loss + self.w_dense_ce * dense_loss
-
-    #             if cls_emb_app[cls_id]:
-    #                 app_t = torch.cat(cls_emb_app[cls_id], dim=0)
-    #                 cons = 1.0 - (F.normalize(dense, dim=1) * F.normalize(app_t.detach(), dim=1)).sum(dim=1)
-    #                 # Nhân với số lượng instance để balance
-    #                 reid_loss = reid_loss + self.w_cons * (cons.mean() * num_instances)
-
-    #     # [CẢI TIẾN 2]: Chia đều loss dựa trên tổng số Bounding Box có ID hợp lệ
-    #     if total_valid_instances > 0:
-    #         reid_loss = reid_loss / total_valid_instances
-            
-    #     return {'loss_reid': reid_loss}
 
     def loss_s4_aux(self, outputs, targets, indices, num_boxes):
         dev = outputs['pred_logits'].device
@@ -622,22 +514,7 @@ class FalconJDECriterion(nn.Module):
         losses['loss_s4_aux'] = gaussian_focal_loss(pred, gt)
         return losses
 
-    # def loss_entropy(self, outputs, targets, indices, num_boxes):
-    #     """Supervise the SAFA entropy scorer (S8) with a Gaussian center heatmap.
 
-    #     Teaches the scorer *where* objects are, so the top-rho keep-mask routes
-    #     the expensive S4 compute to object regions — the premise of the GFLOPs
-    #     reduction.
-    #     """
-    #     dev = outputs['pred_logits'].device
-    #     losses = {'loss_entropy': torch.tensor(0.0, device=dev)}
-    #     if 'pred_entropy' not in outputs:
-    #         return losses
-    #     pred = outputs['pred_entropy']                # [B,1,H8,W8] logit
-    #     _, _, H, W = pred.shape
-    #     gt = build_center_heatmaps(targets, H, W, dev)
-    #     losses['loss_entropy'] = gaussian_focal_loss(pred, gt)
-    #     return losses
     def loss_entropy(self, outputs, targets, indices, num_boxes):
         dev = outputs['pred_logits'].device
         losses = {'loss_entropy': torch.tensor(0.0, device=dev)}
@@ -829,17 +706,23 @@ class FalconJDECriterion(nn.Module):
                 aux = {**outputs['dn_pre_outputs'], 'up': _up, 'reg_scale': _rs, 'is_dn': True}
                 _apply(aux, targets, indices_dn, indices_dn, dn_nb, dn_nb, '_dn_pre')
 
-        # ReID.
+        # ReID — id_weight duoc nhan DUNG MOT LAN tai day.
         if self.use_reid and self.id_weight > 0:
             reid_dict = self.loss_reid(outputs, targets, indices)
             losses.update({k: v * self.id_weight for k, v in reid_dict.items()})
+
+        # [OSD] decorrelation penalty giua hai subspace (chi co khi training + OSD bat).
+        if outputs.get('pred_decorr', None) is not None:
+            losses['loss_decorr'] = outputs['pred_decorr'] * self.decorr_weight
 
         losses = {k: torch.nan_to_num(v, nan=0.0) for k, v in losses.items()}
         reid_loss = losses.get('loss_reid', None)
         det_loss = sum(v for k, v in losses.items() if k != 'loss_reid')
 
-        if self.use_reid and self.id_weight > 0 and reid_loss is not None:
-            total = det_loss + self.id_weight * reid_loss
+        # FIX (double-weighting bug): losses['loss_reid'] da mang id_weight o tren,
+        # KHONG nhan id_weight lan thu hai nua (truoc day reid bi weight = id_weight^2).
+        if reid_loss is not None:
+            total = det_loss + reid_loss
         else:
             total = det_loss
 

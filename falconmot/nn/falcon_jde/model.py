@@ -68,121 +68,56 @@ def _largest_divisor(dim, candidates=(8, 6, 4, 3, 2, 1)):
 
 class _ReIDResBlock(nn.Module):
     """Light residual with a small (3x3 DW) kernel -> adds depth while keeping the
-    correlation peak sharp for QAM, preventing identity bleeding on small objects."""
-    def __init__(self, dim: int):
+    correlation peak sharp for QAM, preventing identity bleeding on small objects.
+
+    drop_path (stochastic depth): chong overfit single-frame o TOWER — jitter/shrink
+    chi augment o input sampling, con tower van co the hoc thuoc texture nen cuc bo
+    cua tung sequence train; drop-path ngau nhien ca residual branch xu ly dung cho do."""
+    def __init__(self, dim: int, drop_path: float = 0.1):
         super().__init__()
         self.dw   = nn.Conv2d(dim, dim, 3, padding=1, groups=dim, bias=False)
         self.norm = LayerNorm2d(dim)
         self.pw   = nn.Conv2d(dim, dim, 1, bias=False)
         self.act  = nn.GELU()
+        self.drop_path = float(drop_path)
 
     def forward(self, x):
-        return x + self.pw(self.act(self.norm(self.dw(x))))
-
-
-# class DenseReIDHead(nn.Module):
-#     """Decoupled ReID head with a single shared field for QAM, exposing
-#     'emb_app' so the dense `cons` loss no longer conflicts with dense_ce."""
-#     def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
-#                  use_s4_dense=False, s4_in_ch=None,
-#                  tower_depth=2, query_gate_init=0.1, detach_input=True,
-#                  **kwargs):
-#         super().__init__()
-#         nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
-#         self.hidden_dim    = hidden_dim
-#         self.reid_dim      = reid_dim
-#         self.num_heads     = nh
-#         self.use_s4_dense  = bool(use_s4_dense and s4_in_ch is not None)
-#         self.detach_input  = bool(detach_input)
-
-#         # (2) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
-#         if self.use_s4_dense:
-#             self.s4_fuse = FeatFusion(s4_in_ch, hidden_dim, n_blocks=1)
-
-#         # (3) OWN tower: project to reid_dim, then tower_depth residual DW3x3 blocks.
-#         self.in_proj = nn.Sequential(
-#             nn.Conv2d(hidden_dim, reid_dim, kernel_size=1, bias=False),
-#             LayerNorm2d(reid_dim),
-#         )
-#         self.dense_tower = nn.Sequential(
-#             *[_ReIDResBlock(reid_dim) for _ in range(max(1, tower_depth))],
-#             LayerNorm2d(reid_dim),
-#         )
-
-#         # SPARSE PATH — the query only locates the sampling points.
-#         self.q_proj      = nn.Linear(hidden_dim, reid_dim)
-#         self.norm_q      = nn.LayerNorm(reid_dim)
-#         self.deform_attn = MSDeformableAttention(
-#             embed_dim=reid_dim, num_heads=nh,
-#             num_levels=1, num_points=num_points, method='default',
-#         )
-#         self.norm_attn   = nn.LayerNorm(reid_dim)
-
-#         # (4) emb content = appearance (dominant) + a gated residual from the query.
-#         self.app_ffn = nn.Sequential(
-#             nn.Linear(reid_dim, reid_dim),
-#             nn.SiLU(inplace=True),
-#             nn.Linear(reid_dim, reid_dim),
-#         )
-#         self.q_content  = nn.Linear(hidden_dim, reid_dim)
-#         self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
-
-#         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
-
-#     def build_emb_map(self, reid_feat, c1=None):
-#         x = reid_feat
-#         if self.use_s4_dense and c1 is not None:
-#             x = self.s4_fuse(c1, reid_feat)
-#         x = self.in_proj(x)
-#         return self.dense_tower(x)
-
-#     def _build_value(self, emb_map):
-#         B, C, H, W = emb_map.shape
-#         v = emb_map.flatten(2).permute(0, 2, 1)
-#         hd = C // self.num_heads
-#         v = v.reshape(B, H * W, self.num_heads, hd).permute(0, 2, 3, 1).contiguous()
-#         return [v], [[H, W]]
-
-#     def forward(self, query, boxes, reid_feat, c1=None, return_dense=False):
-#         if self.detach_input:
-#             reid_feat = reid_feat.detach()
-#             if c1 is not None:
-#                 c1 = c1.detach()
-
-#         emb_map = self.build_emb_map(reid_feat, c1)
-#         value_list, spatial_shapes = self._build_value(emb_map)
-
-#         q_in = self.norm_q(self.q_proj(query))
-#         app_raw = self.deform_attn(q_in, boxes.unsqueeze(2), value_list, spatial_shapes)
-#         app = self.norm_attn(app_raw)
-
-#         app     = app + self.app_ffn(app)
-#         emb_raw = app + self.query_gate * self.q_content(query)
-
-#         out = {
-#             'emb':     self.neck(emb_raw),
-#             'emb_raw': emb_raw,
-#             'emb_app': app_raw,
-#         }
-#         if return_dense:
-#             out['emb_map'] = emb_map
-#         return out
-
+        y = self.pw(self.act(self.norm(self.dw(x))))
+        if self.training and self.drop_path > 0:
+            keep = (torch.rand(x.shape[0], 1, 1, 1, device=x.device, dtype=x.dtype)
+                    >= self.drop_path).to(x.dtype)
+            y = y * keep / (1.0 - self.drop_path)
+        return x + y
 
 # ===========================================================================
-#  DenseReIDHead — Visual Prompting ReID Head with Spatial Jittering
+#  DenseReIDHead — deformable-sampling ReID head (jitter + shrink, DropPath tower)
 # ===========================================================================
 
 class DenseReIDHead(nn.Module):
-    """
-    Decoupled ReID head sử dụng Visual Prompts thay vì Detection Hidden States.
-    Tích hợp Spatial Jittering và Context-Aware Layer để chống overfit trên Single-Frame.
+    """Decoupled ReID head: sample appearance tu shared feature map bang
+    deformable attention tai vi tri box; query (hs.detach()) chi la POINTER.
+
+    Cac chinh sua so voi ban truoc:
+      * SHRINK box la DETERMINISTIC -> ap o CA train va eval (fix train/eval
+        mismatch: truoc day eval sample tren full box trong khi train chi
+        thay vung loi 0.8x, khien inference "nhin" them mot vanh background
+        chua tung duoc train).
+      * JITTER la STOCHASTIC -> chi ap khi training.
+      * BO context_layer (self-attention giua cac embedding): no lam embedding
+        cua object A phu thuoc vao hang xom trong frame -> hang xom doi giua
+        cac frame => temporal instability, hai cho EMA smooth_feat + cosine
+        matching cua tracker.
+      * Tower dung DropPath (stochastic depth) chong overfit single-frame.
+
+    NOTE (use_s4_dense): chi danh cho use_s4=False (reid_feat = feats[0],
+    stride-8). Khi use_s4=True, reid_feat = p2 DA la stride-4 va c1 da duoc
+    fuse trong s4_branch — bat use_s4_dense se fuse c1 hai lan (co hai).
     """
     def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
                  use_s4_dense=False, s4_in_ch=None,
                  tower_depth=2, query_gate_init=0.1, detach_input=True,
-                 box_shrink_factor=0.8, jitter_scale=0.1, # [NOVELTY]: Tham số chống overfit
-                 use_context_layer=True,                  # [NOVELTY]: Lớp giao tiếp Context
+                 box_shrink_factor=0.8, jitter_scale=0.05,
+                 tower_drop_path=0.1,
                  **kwargs):
         super().__init__()
         nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
@@ -193,23 +128,24 @@ class DenseReIDHead(nn.Module):
         self.detach_input  = bool(detach_input)
         self.box_shrink_factor = box_shrink_factor
         self.jitter_scale  = jitter_scale
-        self.use_context_layer = use_context_layer
 
-        # (1) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
+        # (1) HIGH-RES (chi khi use_s4=False): c1(stride-4) + reid_feat(stride-8)
+        #     -> field stride-4. Xem NOTE o docstring.
         if self.use_s4_dense:
             self.s4_fuse = FeatFusion(s4_in_ch, hidden_dim, n_blocks=1)
 
-        # (2) OWN tower: project to reid_dim, then tower_depth residual DW3x3 blocks.
+        # (2) OWN tower: project to reid_dim, then residual DW3x3 blocks (DropPath).
         self.in_proj = nn.Sequential(
             nn.Conv2d(hidden_dim, reid_dim, kernel_size=1, bias=False),
             LayerNorm2d(reid_dim),
         )
         self.dense_tower = nn.Sequential(
-            *[_ReIDResBlock(reid_dim) for _ in range(max(1, tower_depth))],
+            *[_ReIDResBlock(reid_dim, drop_path=tower_drop_path)
+              for _ in range(max(1, tower_depth))],
             LayerNorm2d(reid_dim),
         )
 
-        # (3) SPARSE PATH — Xử lý Visual Prompts
+        # (3) SPARSE PATH — query lam pointer cho deformable sampling.
         self.q_proj      = nn.Linear(hidden_dim, reid_dim)
         self.norm_q      = nn.LayerNorm(reid_dim)
         self.deform_attn = MSDeformableAttention(
@@ -218,7 +154,10 @@ class DenseReIDHead(nn.Module):
         )
         self.norm_attn   = nn.LayerNorm(reid_dim)
 
-        # (4) Content = appearance (dominant) + gated residual từ Prompts
+        # (4) Content = appearance (dominant) + gated residual tu query content.
+        #     Voi query = hs.detach(): day la semantic content DONG (hop le),
+        #     mang thong tin class-level; gate init 0.1 giu appearance dominant.
+        #     KHONG tang gate — hs khong giup tach car-A khoi car-B.
         self.app_ffn = nn.Sequential(
             nn.Linear(reid_dim, reid_dim),
             nn.SiLU(inplace=True),
@@ -226,13 +165,6 @@ class DenseReIDHead(nn.Module):
         )
         self.q_content  = nn.Linear(hidden_dim, reid_dim)
         self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
-
-        # [NOVELTY]: Context-Aware Layer giúp các ReID Prompts đẩy nhau ra xa nếu đứng cạnh nhau
-        if self.use_context_layer:
-            self.context_layer = nn.TransformerEncoderLayer(
-                d_model=reid_dim, nhead=4, dim_feedforward=reid_dim * 2, 
-                dropout=0.0, batch_first=True, norm_first=True
-            )
 
         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
 
@@ -251,7 +183,8 @@ class DenseReIDHead(nn.Module):
         return [v], [[H, W]]
 
     def forward(self, query, boxes, reid_feat, c1=None, return_dense=False):
-        # [GRADIENT ISOLATION]: Chặn gradient ReID làm hỏng Backbone
+        # Gradient isolation (tuy chon; mac dinh False khi dung OSD — projector
+        # truc giao da co lap conflict, gradient ReID nuoi trunk qua subspace rieng).
         if self.detach_input:
             reid_feat = reid_feat.detach()
             if c1 is not None:
@@ -263,30 +196,26 @@ class DenseReIDHead(nn.Module):
         q_in = self.norm_q(self.q_proj(query))
 
         reid_boxes = boxes.clone()
-        if self.training:
-            # [NOVELTY - TRICK CHỐNG OVERFIT CHO SINGLE-FRAME]
-            # 1. Spatial Jittering: Lắc nhẹ tâm Box để ReID không học vẹt background
-            noise_xy = (torch.rand_like(reid_boxes[..., :2]) - 0.5) * self.jitter_scale * reid_boxes[..., 2:]
-            reid_boxes[..., :2] = (reid_boxes[..., :2] + noise_xy).clamp(0.0, 1.0)
-            
-            # 2. Shrink Box: Ép vùng lấy mẫu vào phần lõi (vùng nhân) của vật thể
-            reid_boxes[..., 2:] = reid_boxes[..., 2:] * self.box_shrink_factor
 
-        # Deformable Attention lấy mẫu dựa trên Box đã được Jitter/Shrink
+        # SHRINK — deterministic: ap o CA train va eval de phan phoi sampling
+        # points nhat quan giua hai pha (fix train/eval mismatch).
+        reid_boxes[..., 2:] = reid_boxes[..., 2:] * self.box_shrink_factor
+
+        if self.training:
+            # JITTER — stochastic: chi train; lac nhe tam box de ReID khong
+            # hoc vet background / vi tri tuyet doi.
+            noise_xy = (torch.rand_like(reid_boxes[..., :2]) - 0.5) \
+                       * self.jitter_scale * reid_boxes[..., 2:]
+            reid_boxes[..., :2] = (reid_boxes[..., :2] + noise_xy).clamp(0.0, 1.0)
+
         app_raw = self.deform_attn(q_in, reid_boxes.unsqueeze(2), value_list, spatial_shapes)
         app = self.norm_attn(app_raw)
 
         app     = app + self.app_ffn(app)
         emb_raw = app + self.query_gate * self.q_content(query)
 
-        # Tính toán Context-Aware
-        if hasattr(self, 'context_layer'):
-            emb_final = self.context_layer(emb_raw)
-        else:
-            emb_final = emb_raw
-
         out = {
-            'emb':     self.neck(emb_final),
+            'emb':     self.neck(emb_raw),
             'emb_raw': emb_raw,
             'emb_app': app_raw,
         }
@@ -328,131 +257,95 @@ class S4LightBranch(nn.Module):
         return self.refine(x)
 
 
-# class FalconJDEModel(nn.Module):
-#     def __init__(
-#         self,
-#         backbone: DINOv3STAs,
-#         encoder:  HybridEncoder,
-#         decoder:  DEIMTransformer,
-#         reid_dim: int  = 128,
-#         use_s4:   bool = False,
-#         use_s4_aux: bool = True,
-#         sta_dim:  int  = 0,
-#         use_reid: bool = True,
-#         reid_num_points: int = 8,
-#         reid_grad_scale: float = 1.0,
-#         reid_use_s4_dense=False,
-#         reid_s4_in_ch=None,
-#         use_safa: bool = False,
-#         safa_keep_ratio: float = 0.25,
-#     ):
-#         super().__init__()
-#         self.backbone   = backbone
-#         self.encoder    = encoder
-#         self.decoder    = decoder
-#         self.return_reid_dense = False
-#         self.use_s4     = use_s4
-#         self.use_s4_aux = use_s4_aux
-#         self.use_reid   = use_reid
-#         self.use_safa   = use_safa
-#         self.reid_grad_scale = reid_grad_scale
-        
-#         self.log_am_tau = nn.Parameter(torch.tensor([math.log(0.07)]))
-#         if use_reid:
-#             self.reid_head = DenseReIDHead(
-#                 decoder.hidden_dim, reid_dim,
-#                 num_heads=8, num_points=reid_num_points,
-#                 use_s4_dense=reid_use_s4_dense,
-#                 s4_in_ch=reid_s4_in_ch
-#             )
+# ===========================================================================
+#  OSD — Orthogonal Subspace Decoupling
+# ===========================================================================
 
-#         if use_s4:
-#             if use_safa:
-#                 # SAFA: entropy-gated sparse S4 fusion (replaces dense FeatFusion).
-#                 self.s4_branch = SparseFeatFusion(
-#                     sta_dim, decoder.hidden_dim, n_blocks=2,
-#                     scorer_in_ch=decoder.hidden_dim, keep_ratio=safa_keep_ratio)
-#             else:
-#                 self.s4_branch = FeatFusion(sta_dim, decoder.hidden_dim, n_blocks=2)
-#             self.s4_aux_head = S4AuxiliaryHeadV2(decoder.hidden_dim)
-
-#     def forward(self, x: torch.Tensor, targets=None):
-#         feats = self.backbone(x)
-#         feats = self.encoder(feats)
-#         c1 = getattr(self.backbone, '_s4_feat', None)
-
-#         if self.use_s4:
-#             if self.use_safa:
-#                 p2, ent_logit = self.s4_branch(c1, feats[0])
-#             else:
-#                 p2 = self.s4_branch(c1, feats[0])
-#                 ent_logit = None
-#             dec_feats = [p2, feats[0], feats[1]]
-#             reid_feat = p2
-#         else:
-#             dec_feats = feats
-#             reid_feat = feats[0]
-#             ent_logit = None
-
-#         out = self.decoder(dec_feats, targets)
-
-#         if self.use_s4 and self.use_s4_aux and self.training:
-#             out['pred_s4_aux'] = self.s4_aux_head(p2)
-#         if self.use_safa and ent_logit is not None and self.training:
-#             out['pred_entropy'] = ent_logit
-
-#         if 'eval_hs' in out and self.use_reid:
-#             hs = out.pop('eval_hs')
-#             pred_boxes = out['pred_boxes']
-
-#             want_dense = self.training or getattr(self, 'return_reid_dense', False)
-#             reid_out = self.reid_head(
-#                 hs.detach(), pred_boxes.detach(), reid_feat,
-#                 c1=c1, return_dense=want_dense,
-#             )
-#             out['pred_reid']     = reid_out['emb']
-#             out['pred_reid_raw'] = reid_out['emb_raw']
-#             out['am_tau'] = torch.exp(self.log_am_tau)
-#             if self.training:
-#                 out['pred_reid_app'] = reid_out['emb_app']
-#             if 'emb_map' in reid_out:
-#                 if self.training:
-#                     out['pred_reid_map'] = reid_out['emb_map']
-#                 if getattr(self, 'return_reid_dense', False) and not self.training:
-#                     out['reid_dense']        = reid_out['emb_map'][0]
-#                     out['reid_dense_stride'] = 4 if (self.reid_head.use_s4_dense or self.use_s4) else 8
-#         elif 'eval_hs' in out:
-#             out.pop('eval_hs')
-
-#         return out
-
-#     def deploy(self):
-#         self.eval()
-#         for m in self.modules():
-#             if hasattr(m, 'convert_to_deploy') and m is not self:
-#                 m.convert_to_deploy()
-#         return self
+import torch.nn.functional as Fn
 
 
+class OrthoSubspaceSplit(nn.Module):
+    """OSD — Orthogonal Subspace Decoupling.
+
+    Hoc mot phep xoay truc giao Q thuoc O(C) tren khong gian channel, roi tach
+    thanh hai khong gian con bu truc giao:
+        F_det = P_det . F = Q^T . M_det . Q . F      (detection doc)
+        F_id  = P_id  . F = Q^T . M_id  . Q . F      (ReID doc)
+    voi M_det + M_id = I (mask cheo 0/1). Vi range(P_det) vuong goc range(P_id):
+        <dL_det/dF, dL_id/dF> = 0   (chinh xac, moi batch, moi thoi diem)
+    => conflict tai diem re nhanh bi triet tieu bang hinh hoc, khong can
+    uncertainty weighting hay grad scale. Q duoc giu tren manifold O(C)
+    bang torch parametrization (khong can re-project thu cong).
+    """
+
+    def __init__(self, dim: int, id_ratio: float = 0.25):
+        super().__init__()
+        assert 0.0 < id_ratio < 1.0
+        self.dim  = dim
+        self.c_id = max(8, int(round(dim * id_ratio)))
+        # Q luu duoi dang Linear(C, C) khong bias, parametrize truc giao.
+        self.rot = nn.utils.parametrizations.orthogonal(
+            nn.Linear(dim, dim, bias=False))
+
+    def _Q(self):
+        return self.rot.weight                      # (C, C), Q^T Q = I
+
+    def forward(self, x: torch.Tensor):
+        """x: (B, C, H, W) -> (f_det, f_id, decorr_loss | None)
+
+        f_det, f_id giu nguyen so channel C (chinh la P_det.x, P_id.x) nen
+        decoder va reid head KHONG can doi kien truc. decorr_loss chi tinh
+        khi training.
+        """
+        B, C, H, W = x.shape
+        Q  = self._Q()                              # (C, C)
+        w  = Q.unsqueeze(-1).unsqueeze(-1)          # 1x1 conv kernel  (Q.F)
+        wT = Q.t().unsqueeze(-1).unsqueeze(-1)      # Q^T . F
+
+        z = Fn.conv2d(x, w)                         # z = Q.x  (norm-preserving)
+        z_det, z_id = z[:, :-self.c_id], z[:, -self.c_id:]
+
+        zeros_id  = torch.zeros_like(z_id)
+        zeros_det = torch.zeros_like(z_det)
+        f_det = Fn.conv2d(torch.cat([z_det, zeros_id],  dim=1), wT)  # P_det.x
+        f_id  = Fn.conv2d(torch.cat([zeros_det, z_id],  dim=1), wT)  # P_id.x
+
+        decorr = self._decorr(z_det, z_id) if self.training else None
+        return f_det, f_id, decorr
+
+    @staticmethod
+    def _decorr(z_det: torch.Tensor, z_id: torch.Tensor) -> torch.Tensor:
+        """Barlow-style cross-covariance penalty giua hai subspace (da xoay),
+        chuan hoa theo std de scale-invariant. Ngan mang "lach" bang tuong
+        quan thong ke du da truc giao hinh hoc."""
+        B, Cd, H, W = z_det.shape
+        a = z_det.flatten(2)                        # (B, Cd, HW)
+        b = z_id.flatten(2)                         # (B, Ci, HW)
+        a = (a - a.mean(-1, keepdim=True)) / (a.std(-1, keepdim=True) + 1e-5)
+        b = (b - b.mean(-1, keepdim=True)) / (b.std(-1, keepdim=True) + 1e-5)
+        cov = torch.bmm(a, b.transpose(1, 2)) / (H * W)   # (B, Cd, Ci)
+        return (cov ** 2).mean()
 
 
 class FalconJDEModel(nn.Module):
     def __init__(
         self,
-        backbone,           # Type hint (DINOv3STAs) bỏ đi hoặc giữ tùy file của bạn
-        encoder,            # (HybridEncoder)
-        decoder,            # (DEIMTransformer)
+        backbone,           # DINOv3STAs
+        encoder,            # HybridEncoder
+        decoder,            # DEIMTransformer
         reid_dim: int  = 128,
         use_s4:   bool = False,
         use_s4_aux: bool = True,
         sta_dim:  int  = 0,
         use_reid: bool = True,
         reid_num_points: int = 8,
-        reid_grad_scale: float = 1.0,
+        reid_grad_scale: float = 1.0,   # giu API; 1.0 = khong dung grad scale
         reid_use_s4_dense=False,
         reid_s4_in_ch=None,
         use_safa: bool = False,
         safa_keep_ratio: float = 0.25,
+        use_osd: bool = True,           # [OSD] bat Orthogonal Subspace Decoupling
+        osd_id_ratio: float = 0.33,     # [OSD] ty le channel cho subspace ReID (rank 64 @ dim 192)
     ):
         super().__init__()
         self.backbone   = backbone
@@ -464,24 +357,32 @@ class FalconJDEModel(nn.Module):
         self.use_reid   = use_reid
         self.use_safa   = use_safa
         self.reid_grad_scale = reid_grad_scale
-        
+        self.use_osd    = use_osd
+
+        if use_osd:
+            self.osd = OrthoSubspaceSplit(decoder.hidden_dim, id_ratio=osd_id_ratio)
+
         if use_reid:
+            # Guard: use_s4=True nghia la reid_feat = p2 (stride-4, c1 da fuse
+            # trong s4_branch) — use_s4_dense luc nay se fuse c1 LAN THU HAI.
+            if use_s4 and reid_use_s4_dense:
+                print('[FalconJDE][warn] use_s4=True: reid_feat (p2) da la stride-4; '
+                      'tat reid_use_s4_dense de tranh fuse c1 hai lan.')
+                reid_use_s4_dense = False
+
             self.reid_head = DenseReIDHead(
                 decoder.hidden_dim, reid_dim,
                 num_heads=8, num_points=reid_num_points,
                 use_s4_dense=reid_use_s4_dense,
                 s4_in_ch=reid_s4_in_ch,
-                use_context_layer=False,
-                detach_input=False # [NOVELTY 1]: Bức tường lửa (Gradient Isolation), ép ngắt đạo hàm ReID lan về Backbone
+                tower_drop_path=0.1,
+                # OSD da co lap conflict bang projector truc giao, nen feature
+                # KHONG detach — giu co-adaptation kieu JDE/MOTIP: gradient ReID
+                # nuoi trunk qua subspace rieng, khong dung subspace detection.
+                detach_input=False,
+                jitter_scale=0.05,          # giam tu 0.1: object VisDrone rat nho
+                box_shrink_factor=0.8,
             )
-            
-            # ---------------------------------------------------------
-            # [NOVELTY 2]: KHỞI TẠO REID VISUAL PROMPTS
-            # Cung cấp cho ReID một bộ queries riêng biệt để lấy mẫu đặc trưng,
-            # hoàn toàn độc lập với các queries dùng để định vị (Detection).
-            # ---------------------------------------------------------
-            self.reid_prompts = nn.Embedding(decoder.num_queries, decoder.hidden_dim)
-            nn.init.normal_(self.reid_prompts.weight, std=0.02) # Khởi tạo chuẩn
 
         if use_s4:
             if use_safa:
@@ -504,50 +405,55 @@ class FalconJDEModel(nn.Module):
             else:
                 p2 = self.s4_branch(c1, feats[0])
                 ent_logit = None
-            dec_feats = [p2, feats[0], feats[1]]
-            reid_feat = p2
+            shared = p2
         else:
-            dec_feats = feats
-            reid_feat = feats[0]
+            shared = feats[0]
             ent_logit = None
+
+        # ---------------- [OSD] tach shared map thanh 2 subspace truc giao ----
+        decorr = None
+        if self.use_osd:
+            f_det, f_id, decorr = self.osd(shared)
+        else:
+            f_det, f_id = shared, shared
+
+        if self.use_s4:
+            dec_feats = [f_det, feats[0], feats[1]]
+        else:
+            dec_feats = [f_det, feats[1], feats[2]]
+        reid_feat = f_id
+        # ----------------------------------------------------------------------
 
         out = self.decoder(dec_feats, targets)
 
+        if self.training and decorr is not None:
+            out['pred_decorr'] = decorr
         if self.use_s4 and self.use_s4_aux and self.training:
-            out['pred_s4_aux'] = self.s4_aux_head(p2)
+            out['pred_s4_aux'] = self.s4_aux_head(f_det)
         if self.use_safa and ent_logit is not None and self.training:
             out['pred_entropy'] = ent_logit
 
         if 'eval_hs' in out and self.use_reid:
-            # Pop hidden state (hs) của Detection ra để nó không can thiệp vào ReID
             hs = out.pop('eval_hs')
             pred_boxes = out['pred_boxes']
-
             want_dense = self.training or getattr(self, 'return_reid_dense', False)
-            
-            # ---------------------------------------------------------
-            # [NOVELTY 3]: SỬ DỤNG REID VISUAL PROMPTS THAY THẾ CHO HS
-            # ---------------------------------------------------------
-            B = pred_boxes.shape[0]
-            # Mở rộng (expand) ReID Prompts cho phù hợp với Batch Size hiện tại
-            reid_query = self.reid_prompts.weight.unsqueeze(0).expand(B, -1, -1)
 
-            # Truyền ReID Prompts vào làm query cho mạng lấy mẫu (Deformable Attention)
-            # reid_out = self.reid_head(
-            #     query=reid_query,             # <--- Đổi `hs.detach()` thành `reid_query`
-            #     boxes=pred_boxes.detach(),    # Tọa độ Box vẫn giữ nguyên (làm reference points)
-            #     reid_feat=reid_feat,
-            #     c1=c1, 
-            #     return_dense=want_dense,
-            # )
+            # Thiet ke chuan (JDE/MOTIP-consensus):
+            #   * hs.detach()    — query chi la POINTER: ID loss khong sua
+            #                      semantics phan loai / dinh vi cua decoder.
+            #   * boxes.detach() — ID gradient khong dung box regression.
+            #   * reid_feat      — KHONG detach; gradient chay ve trunk nhung
+            #                      nam tron trong subspace P_id ⟂ P_det (OSD).
+            if self.reid_grad_scale != 1.0:
+                reid_feat = grad_scale(reid_feat, self.reid_grad_scale)
+
             reid_out = self.reid_head(
-                query=reid_query,             # <--- Đổi `hs.detach()` thành `reid_query`
-                boxes=pred_boxes,    # Tọa độ Box vẫn giữ nguyên (làm reference points)
+                query=hs.detach(),
+                boxes=pred_boxes.detach(),
                 reid_feat=reid_feat,
-                c1=c1, 
+                c1=c1,
                 return_dense=want_dense,
             )
-            
             out['pred_reid']     = reid_out['emb']
             out['pred_reid_raw'] = reid_out['emb_raw']
             if self.training:
@@ -750,6 +656,8 @@ def build_falcon_jde(opt) -> FalconJDEModel:
         reid_s4_in_ch=getattr(opt, 'conv_inplane', 32),
         use_safa=getattr(opt, 'use_safa', False),
         safa_keep_ratio=getattr(opt, 'safa_keep_ratio', 1.0),
+        use_osd=getattr(opt, 'use_osd', True),
+        osd_id_ratio=getattr(opt, 'osd_id_ratio', 0.33),
     )
 
     ckpt_path = getattr(opt, 'deim_pretrained', '')
