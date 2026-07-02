@@ -834,14 +834,14 @@ class opts(object):
                                  help='GridMask: erase regular grid pattern to simulate occlusion')
         self.parser.add_argument('--gridmask_prob', type=float, default=0.3,
                                  help='probability of applying gridmask per sample')
-        self.parser.add_argument('--homography', action='store_true', default=True,
+        self.parser.add_argument('--homography', action='store_true', default=False,
                                  help='random perspective warp (alt to affine) for viewpoint diversity')
         self.parser.add_argument('--no_homography', dest='homography', action='store_false')
         self.parser.add_argument('--homography_prob', type=float, default=0.3,
                                  help='probability of using homography instead of affine')
         self.parser.add_argument('--homography_strength', type=float, default=0.12,
                                  help='corner-jitter fraction of image size (0.08-0.15 sane)')
-        self.parser.add_argument('--obj_occlusion', action='store_true', default=True)
+        self.parser.add_argument('--obj_occlusion', action='store_true', default=False)
         self.parser.add_argument('--no_obj_occlusion', dest='obj_occlusion', action='store_false')
         self.parser.add_argument('--obj_occ_prob', type=float, default=0.5)
         self.parser.add_argument('--obj_occ_frac', type=float, default=0.3)

@@ -119,7 +119,7 @@ class VisDroneCocoDataset(torch.utils.data.Dataset):
         # New Augmentations
         self.use_zoom_out          = True
         self.zoom_out_prob         = 0.4
-        self.use_random_crop       = getattr(opt, 'random_crop',          True)
+        self.use_random_crop       = getattr(opt, 'random_crop',          False)
         self.random_crop_prob      = getattr(opt, 'random_crop_prob',     0.4)
 
         self.use_homography        = getattr(opt, 'homography',           True)

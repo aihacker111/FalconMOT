@@ -839,8 +839,7 @@ class FalconJDECriterion(nn.Module):
         det_loss = sum(v for k, v in losses.items() if k != 'loss_reid')
 
         if self.use_reid and self.id_weight > 0 and reid_loss is not None:
-            # total = det_loss + self.id_weight * reid_loss
-            total = reid_loss
+            total = det_loss + self.id_weight * reid_loss
         else:
             total = det_loss
 
