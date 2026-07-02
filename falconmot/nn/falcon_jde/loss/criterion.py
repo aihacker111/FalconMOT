@@ -392,7 +392,6 @@ class FalconJDECriterion(nn.Module):
         """Per-class ReID: sparse CE(+Triplet) + dense alignment (if pred_reid_map is given)."""
         if 'pred_reid' not in outputs:
             return {}
-        am_tau = outputs['am_tau']
         pred_reid = outputs['pred_reid']                       # (B,N,D) post-neck
         pred_reid_raw = outputs.get('pred_reid_raw', pred_reid)  # (B,N,D) pre-neck
         pred_reid_map = outputs.get('pred_reid_map', None)       # (B,D,H,W) | None
@@ -466,7 +465,6 @@ class FalconJDECriterion(nn.Module):
             else:
                 emb_id = self.emb_scale_dict[cls_id] * F.normalize(emb, dim=1)
                 logits = self.linear_classifiers[str(cls_id)](emb_id)
-            logits = logits / am_tau
             if self.use_tucl and cls_w[cls_id]:
                 # T-UCL: down-weight unreliable (small/blurry) samples, with a
                 # -lambda*log(w) term (Kendall homoscedastic uncertainty) that
@@ -489,7 +487,6 @@ class FalconJDECriterion(nn.Module):
                 else:
                     emb_id_d = self.emb_scale_dict[cls_id] * F.normalize(dense, dim=1)
                     logits_d = self.linear_classifiers[str(cls_id)](emb_id_d)
-                logits_d = logits_d / am_tau
                 reid_loss = reid_loss + self.w_dense_ce * self.ce_loss(logits_d, ids)
 
                 if cls_emb_app[cls_id]:

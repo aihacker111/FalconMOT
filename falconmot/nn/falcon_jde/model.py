@@ -80,102 +80,12 @@ class _ReIDResBlock(nn.Module):
         return x + self.pw(self.act(self.norm(self.dw(x))))
 
 
-class DenseReIDHead(nn.Module):
-    """Decoupled ReID head with a single shared field for QAM, exposing
-    'emb_app' so the dense `cons` loss no longer conflicts with dense_ce."""
-    def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
-                 use_s4_dense=False, s4_in_ch=None,
-                 tower_depth=2, query_gate_init=0.1, detach_input=True,
-                 **kwargs):
-        super().__init__()
-        nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
-        self.hidden_dim    = hidden_dim
-        self.reid_dim      = reid_dim
-        self.num_heads     = nh
-        self.use_s4_dense  = bool(use_s4_dense and s4_in_ch is not None)
-        self.detach_input  = bool(detach_input)
-
-        # (2) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
-        if self.use_s4_dense:
-            self.s4_fuse = FeatFusion(s4_in_ch, hidden_dim, n_blocks=1)
-
-        # (3) OWN tower: project to reid_dim, then tower_depth residual DW3x3 blocks.
-        self.in_proj = nn.Sequential(
-            nn.Conv2d(hidden_dim, reid_dim, kernel_size=1, bias=False),
-            LayerNorm2d(reid_dim),
-        )
-        self.dense_tower = nn.Sequential(
-            *[_ReIDResBlock(reid_dim) for _ in range(max(1, tower_depth))],
-            LayerNorm2d(reid_dim),
-        )
-
-        # SPARSE PATH — the query only locates the sampling points.
-        self.q_proj      = nn.Linear(hidden_dim, reid_dim)
-        self.norm_q      = nn.LayerNorm(reid_dim)
-        self.deform_attn = MSDeformableAttention(
-            embed_dim=reid_dim, num_heads=nh,
-            num_levels=1, num_points=num_points, method='default',
-        )
-        self.norm_attn   = nn.LayerNorm(reid_dim)
-
-        # (4) emb content = appearance (dominant) + a gated residual from the query.
-        self.app_ffn = nn.Sequential(
-            nn.Linear(reid_dim, reid_dim),
-            nn.SiLU(inplace=True),
-            nn.Linear(reid_dim, reid_dim),
-        )
-        self.q_content  = nn.Linear(hidden_dim, reid_dim)
-        self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
-
-        self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
-
-    def build_emb_map(self, reid_feat, c1=None):
-        x = reid_feat
-        if self.use_s4_dense and c1 is not None:
-            x = self.s4_fuse(c1, reid_feat)
-        x = self.in_proj(x)
-        return self.dense_tower(x)
-
-    def _build_value(self, emb_map):
-        B, C, H, W = emb_map.shape
-        v = emb_map.flatten(2).permute(0, 2, 1)
-        hd = C // self.num_heads
-        v = v.reshape(B, H * W, self.num_heads, hd).permute(0, 2, 3, 1).contiguous()
-        return [v], [[H, W]]
-
-    def forward(self, query, boxes, reid_feat, c1=None, return_dense=False):
-        if self.detach_input:
-            reid_feat = reid_feat.detach()
-            if c1 is not None:
-                c1 = c1.detach()
-
-        emb_map = self.build_emb_map(reid_feat, c1)
-        value_list, spatial_shapes = self._build_value(emb_map)
-
-        q_in = self.norm_q(self.q_proj(query))
-        app_raw = self.deform_attn(q_in, boxes.unsqueeze(2), value_list, spatial_shapes)
-        app = self.norm_attn(app_raw)
-
-        app     = app + self.app_ffn(app)
-        emb_raw = app + self.query_gate * self.q_content(query)
-
-        out = {
-            'emb':     self.neck(emb_raw),
-            'emb_raw': emb_raw,
-            'emb_app': app_raw,
-        }
-        if return_dense:
-            out['emb_map'] = emb_map
-        return out
-
-
 # class DenseReIDHead(nn.Module):
 #     """Decoupled ReID head with a single shared field for QAM, exposing
 #     'emb_app' so the dense `cons` loss no longer conflicts with dense_ce."""
 #     def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
 #                  use_s4_dense=False, s4_in_ch=None,
 #                  tower_depth=2, query_gate_init=0.1, detach_input=True,
-#                  box_shrink_factor=0.5,  # [CẢI TIẾN 1]: Thu nhỏ box để tránh dính nền
 #                  **kwargs):
 #         super().__init__()
 #         nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
@@ -184,7 +94,6 @@ class DenseReIDHead(nn.Module):
 #         self.num_heads     = nh
 #         self.use_s4_dense  = bool(use_s4_dense and s4_in_ch is not None)
 #         self.detach_input  = bool(detach_input)
-#         self.box_shrink_factor = box_shrink_factor
 
 #         # (2) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
 #         if self.use_s4_dense:
@@ -218,12 +127,6 @@ class DenseReIDHead(nn.Module):
 #         self.q_content  = nn.Linear(hidden_dim, reid_dim)
 #         self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
 
-#         # [CẢI TIẾN 3]: Context-Aware Layer giúp các vector ReID đẩy nhau ra xa nếu đứng cạnh nhau
-#         self.context_layer = nn.TransformerEncoderLayer(
-#             d_model=reid_dim, nhead=4, dim_feedforward=reid_dim * 2, 
-#             dropout=0.0, batch_first=True, norm_first=True
-#         )
-
 #         self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
 
 #     def build_emb_map(self, reid_feat, c1=None):
@@ -250,29 +153,147 @@ class DenseReIDHead(nn.Module):
 #         value_list, spatial_shapes = self._build_value(emb_map)
 
 #         q_in = self.norm_q(self.q_proj(query))
-
-#         # [CẢI TIẾN 1]: Shrink Bounding Box để Deformable Attention lấy mẫu chụm vào lõi vật thể
-#         reid_boxes = boxes.clone()
-#         reid_boxes[..., 2:] = reid_boxes[..., 2:] * self.box_shrink_factor
-
-#         # Dùng reid_boxes đã shrink để lấy mẫu
-#         app_raw = self.deform_attn(q_in, reid_boxes.unsqueeze(2), value_list, spatial_shapes)
+#         app_raw = self.deform_attn(q_in, boxes.unsqueeze(2), value_list, spatial_shapes)
 #         app = self.norm_attn(app_raw)
 
 #         app     = app + self.app_ffn(app)
 #         emb_raw = app + self.query_gate * self.q_content(query)
 
-#         # [CẢI TIẾN 3]: Áp dụng Context-Aware Layer
-#         emb_context = self.context_layer(emb_raw)
-
 #         out = {
-#             'emb':     self.neck(emb_context), # Dùng feature đã có bối cảnh
-#             'emb_raw': emb_raw,                # Giữ nguyên bản để tính loss nếu cần
+#             'emb':     self.neck(emb_raw),
+#             'emb_raw': emb_raw,
 #             'emb_app': app_raw,
 #         }
 #         if return_dense:
 #             out['emb_map'] = emb_map
 #         return out
+
+
+# ===========================================================================
+#  DenseReIDHead — Visual Prompting ReID Head with Spatial Jittering
+# ===========================================================================
+
+class DenseReIDHead(nn.Module):
+    """
+    Decoupled ReID head sử dụng Visual Prompts thay vì Detection Hidden States.
+    Tích hợp Spatial Jittering và Context-Aware Layer để chống overfit trên Single-Frame.
+    """
+    def __init__(self, hidden_dim, reid_dim, num_heads=8, num_points=8,
+                 use_s4_dense=False, s4_in_ch=None,
+                 tower_depth=2, query_gate_init=0.1, detach_input=True,
+                 box_shrink_factor=0.8, jitter_scale=0.1, # [NOVELTY]: Tham số chống overfit
+                 use_context_layer=True,                  # [NOVELTY]: Lớp giao tiếp Context
+                 **kwargs):
+        super().__init__()
+        nh = num_heads if reid_dim % num_heads == 0 else _largest_divisor(reid_dim)
+        self.hidden_dim    = hidden_dim
+        self.reid_dim      = reid_dim
+        self.num_heads     = nh
+        self.use_s4_dense  = bool(use_s4_dense and s4_in_ch is not None)
+        self.detach_input  = bool(detach_input)
+        self.box_shrink_factor = box_shrink_factor
+        self.jitter_scale  = jitter_scale
+        self.use_context_layer = use_context_layer
+
+        # (1) HIGH-RES: c1(stride-4) + reid_feat(stride-8) -> field stride-4.
+        if self.use_s4_dense:
+            self.s4_fuse = FeatFusion(s4_in_ch, hidden_dim, n_blocks=1)
+
+        # (2) OWN tower: project to reid_dim, then tower_depth residual DW3x3 blocks.
+        self.in_proj = nn.Sequential(
+            nn.Conv2d(hidden_dim, reid_dim, kernel_size=1, bias=False),
+            LayerNorm2d(reid_dim),
+        )
+        self.dense_tower = nn.Sequential(
+            *[_ReIDResBlock(reid_dim) for _ in range(max(1, tower_depth))],
+            LayerNorm2d(reid_dim),
+        )
+
+        # (3) SPARSE PATH — Xử lý Visual Prompts
+        self.q_proj      = nn.Linear(hidden_dim, reid_dim)
+        self.norm_q      = nn.LayerNorm(reid_dim)
+        self.deform_attn = MSDeformableAttention(
+            embed_dim=reid_dim, num_heads=nh,
+            num_levels=1, num_points=num_points, method='default',
+        )
+        self.norm_attn   = nn.LayerNorm(reid_dim)
+
+        # (4) Content = appearance (dominant) + gated residual từ Prompts
+        self.app_ffn = nn.Sequential(
+            nn.Linear(reid_dim, reid_dim),
+            nn.SiLU(inplace=True),
+            nn.Linear(reid_dim, reid_dim),
+        )
+        self.q_content  = nn.Linear(hidden_dim, reid_dim)
+        self.query_gate = nn.Parameter(torch.tensor(float(query_gate_init)))
+
+        # [NOVELTY]: Context-Aware Layer giúp các ReID Prompts đẩy nhau ra xa nếu đứng cạnh nhau
+        if self.use_context_layer:
+            self.context_layer = nn.TransformerEncoderLayer(
+                d_model=reid_dim, nhead=4, dim_feedforward=reid_dim * 2, 
+                dropout=0.0, batch_first=True, norm_first=True
+            )
+
+        self.neck = nn.LayerNorm(reid_dim, elementwise_affine=False)
+
+    def build_emb_map(self, reid_feat, c1=None):
+        x = reid_feat
+        if self.use_s4_dense and c1 is not None:
+            x = self.s4_fuse(c1, reid_feat)
+        x = self.in_proj(x)
+        return self.dense_tower(x)
+
+    def _build_value(self, emb_map):
+        B, C, H, W = emb_map.shape
+        v = emb_map.flatten(2).permute(0, 2, 1)
+        hd = C // self.num_heads
+        v = v.reshape(B, H * W, self.num_heads, hd).permute(0, 2, 3, 1).contiguous()
+        return [v], [[H, W]]
+
+    def forward(self, query, boxes, reid_feat, c1=None, return_dense=False):
+        # [GRADIENT ISOLATION]: Chặn gradient ReID làm hỏng Backbone
+        if self.detach_input:
+            reid_feat = reid_feat.detach()
+            if c1 is not None:
+                c1 = c1.detach()
+
+        emb_map = self.build_emb_map(reid_feat, c1)
+        value_list, spatial_shapes = self._build_value(emb_map)
+
+        q_in = self.norm_q(self.q_proj(query))
+
+        reid_boxes = boxes.clone()
+        if self.training:
+            # [NOVELTY - TRICK CHỐNG OVERFIT CHO SINGLE-FRAME]
+            # 1. Spatial Jittering: Lắc nhẹ tâm Box để ReID không học vẹt background
+            noise_xy = (torch.rand_like(reid_boxes[..., :2]) - 0.5) * self.jitter_scale * reid_boxes[..., 2:]
+            reid_boxes[..., :2] = (reid_boxes[..., :2] + noise_xy).clamp(0.0, 1.0)
+            
+            # 2. Shrink Box: Ép vùng lấy mẫu vào phần lõi (vùng nhân) của vật thể
+            reid_boxes[..., 2:] = reid_boxes[..., 2:] * self.box_shrink_factor
+
+        # Deformable Attention lấy mẫu dựa trên Box đã được Jitter/Shrink
+        app_raw = self.deform_attn(q_in, reid_boxes.unsqueeze(2), value_list, spatial_shapes)
+        app = self.norm_attn(app_raw)
+
+        app     = app + self.app_ffn(app)
+        emb_raw = app + self.query_gate * self.q_content(query)
+
+        # Tính toán Context-Aware
+        if hasattr(self, 'context_layer'):
+            emb_final = self.context_layer(emb_raw)
+        else:
+            emb_final = emb_raw
+
+        out = {
+            'emb':     self.neck(emb_final),
+            'emb_raw': emb_raw,
+            'emb_app': app_raw,
+        }
+        if return_dense:
+            out['emb_map'] = emb_map
+        return out
+
 
 class S4AuxiliaryHead(nn.Module):
     def __init__(self, in_channels: int):
@@ -307,12 +328,120 @@ class S4LightBranch(nn.Module):
         return self.refine(x)
 
 
+# class FalconJDEModel(nn.Module):
+#     def __init__(
+#         self,
+#         backbone: DINOv3STAs,
+#         encoder:  HybridEncoder,
+#         decoder:  DEIMTransformer,
+#         reid_dim: int  = 128,
+#         use_s4:   bool = False,
+#         use_s4_aux: bool = True,
+#         sta_dim:  int  = 0,
+#         use_reid: bool = True,
+#         reid_num_points: int = 8,
+#         reid_grad_scale: float = 1.0,
+#         reid_use_s4_dense=False,
+#         reid_s4_in_ch=None,
+#         use_safa: bool = False,
+#         safa_keep_ratio: float = 0.25,
+#     ):
+#         super().__init__()
+#         self.backbone   = backbone
+#         self.encoder    = encoder
+#         self.decoder    = decoder
+#         self.return_reid_dense = False
+#         self.use_s4     = use_s4
+#         self.use_s4_aux = use_s4_aux
+#         self.use_reid   = use_reid
+#         self.use_safa   = use_safa
+#         self.reid_grad_scale = reid_grad_scale
+        
+#         self.log_am_tau = nn.Parameter(torch.tensor([math.log(0.07)]))
+#         if use_reid:
+#             self.reid_head = DenseReIDHead(
+#                 decoder.hidden_dim, reid_dim,
+#                 num_heads=8, num_points=reid_num_points,
+#                 use_s4_dense=reid_use_s4_dense,
+#                 s4_in_ch=reid_s4_in_ch
+#             )
+
+#         if use_s4:
+#             if use_safa:
+#                 # SAFA: entropy-gated sparse S4 fusion (replaces dense FeatFusion).
+#                 self.s4_branch = SparseFeatFusion(
+#                     sta_dim, decoder.hidden_dim, n_blocks=2,
+#                     scorer_in_ch=decoder.hidden_dim, keep_ratio=safa_keep_ratio)
+#             else:
+#                 self.s4_branch = FeatFusion(sta_dim, decoder.hidden_dim, n_blocks=2)
+#             self.s4_aux_head = S4AuxiliaryHeadV2(decoder.hidden_dim)
+
+#     def forward(self, x: torch.Tensor, targets=None):
+#         feats = self.backbone(x)
+#         feats = self.encoder(feats)
+#         c1 = getattr(self.backbone, '_s4_feat', None)
+
+#         if self.use_s4:
+#             if self.use_safa:
+#                 p2, ent_logit = self.s4_branch(c1, feats[0])
+#             else:
+#                 p2 = self.s4_branch(c1, feats[0])
+#                 ent_logit = None
+#             dec_feats = [p2, feats[0], feats[1]]
+#             reid_feat = p2
+#         else:
+#             dec_feats = feats
+#             reid_feat = feats[0]
+#             ent_logit = None
+
+#         out = self.decoder(dec_feats, targets)
+
+#         if self.use_s4 and self.use_s4_aux and self.training:
+#             out['pred_s4_aux'] = self.s4_aux_head(p2)
+#         if self.use_safa and ent_logit is not None and self.training:
+#             out['pred_entropy'] = ent_logit
+
+#         if 'eval_hs' in out and self.use_reid:
+#             hs = out.pop('eval_hs')
+#             pred_boxes = out['pred_boxes']
+
+#             want_dense = self.training or getattr(self, 'return_reid_dense', False)
+#             reid_out = self.reid_head(
+#                 hs.detach(), pred_boxes.detach(), reid_feat,
+#                 c1=c1, return_dense=want_dense,
+#             )
+#             out['pred_reid']     = reid_out['emb']
+#             out['pred_reid_raw'] = reid_out['emb_raw']
+#             out['am_tau'] = torch.exp(self.log_am_tau)
+#             if self.training:
+#                 out['pred_reid_app'] = reid_out['emb_app']
+#             if 'emb_map' in reid_out:
+#                 if self.training:
+#                     out['pred_reid_map'] = reid_out['emb_map']
+#                 if getattr(self, 'return_reid_dense', False) and not self.training:
+#                     out['reid_dense']        = reid_out['emb_map'][0]
+#                     out['reid_dense_stride'] = 4 if (self.reid_head.use_s4_dense or self.use_s4) else 8
+#         elif 'eval_hs' in out:
+#             out.pop('eval_hs')
+
+#         return out
+
+#     def deploy(self):
+#         self.eval()
+#         for m in self.modules():
+#             if hasattr(m, 'convert_to_deploy') and m is not self:
+#                 m.convert_to_deploy()
+#         return self
+
+
+
+
 class FalconJDEModel(nn.Module):
     def __init__(
         self,
-        backbone: DINOv3STAs,
-        encoder:  HybridEncoder,
-        decoder:  DEIMTransformer,
+        backbone,           # Type hint (DINOv3STAs) bỏ đi hoặc giữ tùy file của bạn
+        encoder,            # (HybridEncoder)
+        decoder,            # (DEIMTransformer)
         reid_dim: int  = 128,
         use_s4:   bool = False,
         use_s4_aux: bool = True,
@@ -336,14 +465,22 @@ class FalconJDEModel(nn.Module):
         self.use_safa   = use_safa
         self.reid_grad_scale = reid_grad_scale
         
-        self.log_am_tau = nn.Parameter(torch.tensor([math.log(0.07)]))
         if use_reid:
             self.reid_head = DenseReIDHead(
                 decoder.hidden_dim, reid_dim,
                 num_heads=8, num_points=reid_num_points,
                 use_s4_dense=reid_use_s4_dense,
-                s4_in_ch=reid_s4_in_ch
+                s4_in_ch=reid_s4_in_ch,
+                detach_input=True # [NOVELTY 1]: Bức tường lửa (Gradient Isolation), ép ngắt đạo hàm ReID lan về Backbone
             )
+            
+            # ---------------------------------------------------------
+            # [NOVELTY 2]: KHỞI TẠO REID VISUAL PROMPTS
+            # Cung cấp cho ReID một bộ queries riêng biệt để lấy mẫu đặc trưng,
+            # hoàn toàn độc lập với các queries dùng để định vị (Detection).
+            # ---------------------------------------------------------
+            self.reid_prompts = nn.Embedding(decoder.num_queries, decoder.hidden_dim)
+            nn.init.normal_(self.reid_prompts.weight, std=0.02) # Khởi tạo chuẩn
 
         if use_s4:
             if use_safa:
@@ -381,17 +518,30 @@ class FalconJDEModel(nn.Module):
             out['pred_entropy'] = ent_logit
 
         if 'eval_hs' in out and self.use_reid:
+            # Pop hidden state (hs) của Detection ra để nó không can thiệp vào ReID
             hs = out.pop('eval_hs')
             pred_boxes = out['pred_boxes']
 
             want_dense = self.training or getattr(self, 'return_reid_dense', False)
+            
+            # ---------------------------------------------------------
+            # [NOVELTY 3]: SỬ DỤNG REID VISUAL PROMPTS THAY THẾ CHO HS
+            # ---------------------------------------------------------
+            B = pred_boxes.shape[0]
+            # Mở rộng (expand) ReID Prompts cho phù hợp với Batch Size hiện tại
+            reid_query = self.reid_prompts.weight.unsqueeze(0).expand(B, -1, -1)
+
+            # Truyền ReID Prompts vào làm query cho mạng lấy mẫu (Deformable Attention)
             reid_out = self.reid_head(
-                hs.detach(), pred_boxes.detach(), reid_feat,
-                c1=c1, return_dense=want_dense,
+                query=reid_query,             # <--- Đổi `hs.detach()` thành `reid_query`
+                boxes=pred_boxes.detach(),    # Tọa độ Box vẫn giữ nguyên (làm reference points)
+                reid_feat=reid_feat,
+                c1=c1, 
+                return_dense=want_dense,
             )
+            
             out['pred_reid']     = reid_out['emb']
             out['pred_reid_raw'] = reid_out['emb_raw']
-            out['am_tau'] = torch.exp(self.log_am_tau)
             if self.training:
                 out['pred_reid_app'] = reid_out['emb_app']
             if 'emb_map' in reid_out:
